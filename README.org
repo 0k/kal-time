@@ -102,3 +102,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 #+END_SRC
+
+* Command-line Utility
+
+~kt-parse~ is a thin wrapper around the library, useful in scripts and
+shell pipelines.
+
+Run ~kt-parse --help~ for a quick usage reminder.
+
+** Parse a time with the current clock
+
+#+BEGIN_EXAMPLE
+$ kt-parse time 9h
+1761104400 2025-10-22 09:00:00 +00:00
+#+END_EXAMPLE
+
+** Parse a time with an explicit reference
+
+You can supply a fully specified reference (RFC3339 or similar) when you
+need deterministic results regardless of the machine clock.
+
+#+BEGIN_EXAMPLE
+$ kt-parse time 30m 2025-10-22T09:10:11+00:00
+1761105011 2025-10-22 09:30:11 +00:00
+#+END_EXAMPLE
+
+** Parse a timespan
+
+Timespans print two lines: start then end. Relative fields reuse the
+reference on a per-field basis.
+
+#+BEGIN_EXAMPLE
+$ kt-parse timespan 9h..10h 2025-10-22T09:10:11+00:00
+1761104400 2025-10-22 09:00:00 +00:00
+1761108000 2025-10-22 10:00:00 +00:00
+#+END_EXAMPLE
