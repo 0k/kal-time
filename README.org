@@ -1,0 +1,104 @@
+#+TITLE: kal-time Repository
+
+* Overview
+
+~kal-time~ is a tiny Rust library for parsing human-friendly time and
+timespan expressions into ~chrono::DateTime<FixedOffset>~. It supports
+relative parsing against a caller-provided reference moment and
+gracefully fills missing segments (date, time, or offset) using either
+zeroes or the supplied reference.
+
+Use it when you want a CLI or automation tool to accept terse inputs
+such as ~"9h..10h"~ for “today between 9 and 10” or ~"30m"~ to fix the
+minute field to ~00:30~ while reusing the current day/hour, without
+forcing users to type full ISO timestamps.
+
+This is more a tiny piece of code I use between many different
+project. It has no ambition to become anything big, and the quality is
+alpha level.
+
+* Build & Test
+
+- ~cargo build~ — compile the library and surface warnings.
+
+- ~cargo test~ — execute unit tests embedded alongside the modules.
+
+- ~cargo fmt~ and ~cargo clippy~ — enforce formatting and linting prior to review.
+
+* Usage Examples
+
+Each snippet shows how a public helper parses input and what kind of
+timestamp it produces.
+
+** Relative offset from a reference
+
+Use ~parse_with_reference~ to interpret partial or relative
+expressions against a known moment.
+
+#+BEGIN_SRC rust
+use chrono::TimeZone;
+use chrono::Utc;
+use kal_time::parse_with_reference;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let reference = Utc.with_ymd_and_hms(2025, 10, 22, 9, 10, 11).unwrap();
+    let parsed = parse_with_reference("30m", &reference)?;
+
+    println!("{}", parsed);
+    // => 2025-10-22 09:30:00 +00:00
+    Ok(())
+}
+#+END_SRC
+
+** Parsing absolute time with local defaults
+
+~parse~ assumes the local clock when fields are missing; full
+timestamps stay in the caller's local offset.
+
+#+BEGIN_SRC rust
+use kal_time::parse;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let parsed = parse("2025-10-22 14:30")?;
+
+    println!("{}", parsed);
+    // => 2025-10-22 14:30:00 +<local offset>
+    Ok(())
+}
+#+END_SRC
+
+** UTC parsing shortcut
+
+~parse_utc~ mirrors ~parse~ but always anchors missing pieces to the
+current UTC reference.
+
+#+BEGIN_SRC rust
+use kal_time::parse_utc;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let parsed = parse_utc("9h")?;
+
+    println!("{}", parsed);
+    // => <today’s date> 09:00:00 +00:00
+    Ok(())
+}
+#+END_SRC
+
+** Parsing timespans
+
+~parse_timespan~ expands a range like ~start..end~ into start/stop
+instants, defaulting to a 1-day window when no end is supplied.
+
+#+BEGIN_SRC rust
+use kal_time::parse_timespan;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let (start, stop) = parse_timespan("2025-10-20..2025-10-22 12:00")?;
+
+    println!("start: {}", start);
+    println!("stop:  {}", stop);
+    // => start: 2025-10-20 00:00:00 +<local offset>
+    // => stop:  2025-10-22 12:00:00 +<local offset>
+    Ok(())
+}
+#+END_SRC
