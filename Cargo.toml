@@ -1,0 +1,10 @@
+[package]
+name = "kal-time"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+chrono = { version = "0.4.31" }
+fern = "0.6.2"
+log = "0.4.20"
+lazy_static = "1.4.0"
