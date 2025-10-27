@@ -44,7 +44,7 @@ pub fn parse_partial<Tz: TimeZone>(
     type Setter = fn(&mut Parsed, i64) -> ParseResult<()>;
 
     if parsed.timestamp.is_none() {
-        let nums = vec![Nanosecond, Second, Minute, Hour, Day, Month, Year];
+        let nums = [Nanosecond, Second, Minute, Hour, Day, Month, Year];
         let mut complete_with_zeroes = complete_with_zeroes;
         for num in nums.iter() {
             let (get, set, replace, min): (Getter<i64, Tz>, Setter, bool, i64) = match num {
@@ -78,22 +78,29 @@ pub fn parse_partial<Tz: TimeZone>(
             }
         }
     }
-    // If the offset is not specified, use the reference offset
-    let offset = reference.offset().fix().local_minus_utc(); // i32 from offset
-    let datetime = parsed.to_naive_datetime_with_offset(offset)?; // NaiveDateTime
-    let offset = match FixedOffset::east_opt(offset) {
-        Some(off) => off,
-        None => {
-            // XXXvlab: workaround the fact that ParseError constructor is private
-            parsed.set_year_mod_100(101)?;
-            unreachable!();
+    // Resolve the final offset using the reference timezone at the target local datetime
+    // Build naive local datetime without applying the reference's current offset
+    let naive = parsed.to_naive_datetime_with_offset(0)?;
+
+    // If input provided an absolute timestamp (@%s), treat it as UTC
+    if parsed.timestamp.is_some() {
+        let off0 = FixedOffset::east_opt(0).unwrap();
+        return Ok(off0.from_utc_datetime(&naive));
+    }
+
+    // Map the naive local time into the system local timezone to pick the correct DST offset
+    // Choose resolution mode based on reference: UTC-like keeps UTC, otherwise use system local (with DST)
+    let dt_fixed: DateTime<FixedOffset> = if reference.offset().fix().local_minus_utc() == 0 {
+        let off0 = FixedOffset::east_opt(0).unwrap();
+        off0.from_utc_datetime(&naive)
+    } else {
+        match chrono::Local.from_local_datetime(&naive) {
+            LocalResult::Single(dt) => dt.with_timezone(&dt.offset().fix()),
+            LocalResult::Ambiguous(a, _b) => a.with_timezone(&a.offset().fix()), // pick earlier
+            LocalResult::None => unreachable!(),
         }
     };
-
-    match offset.from_local_datetime(&datetime) {
-        LocalResult::Single(t) => Ok(t),
-        _ => unreachable!(),
-    }
+    Ok(dt_fixed)
 }
 
 #[cfg(test)]
