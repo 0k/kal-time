@@ -149,4 +149,32 @@ mod tests {
         assert_eq!(start, expected_start);
         assert_eq!(stop, expected_stop);
     }
+
+    #[test]
+    fn test_full_datetime_should_ignore_reference_offset() {
+        // Demonstrate bug: a fully specified local datetime string parses differently
+        // when the reference has different offsets (winter vs summer).
+        unsafe {
+            std::env::set_var("TZ", "Europe/Paris");
+        }
+        let s = "2025-10-22 03:17"; // wall time in Paris
+
+        let ref_winter = chrono::FixedOffset::east_opt(3600)
+            .unwrap()
+            .with_ymd_and_hms(2025, 12, 1, 12, 0, 0)
+            .unwrap();
+        let ref_summer = chrono::FixedOffset::east_opt(7200)
+            .unwrap()
+            .with_ymd_and_hms(2025, 7, 1, 12, 0, 0)
+            .unwrap();
+
+        let a = super::parse_with_reference(s, &ref_winter).expect("winter ref parse");
+        let b = super::parse_with_reference(s, &ref_summer).expect("summer ref parse");
+
+        assert_eq!(
+            a, b,
+            "Parsed times should be equal regardless of reference offset, got {} vs {}",
+            a, b
+        );
+    }
 }
