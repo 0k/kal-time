@@ -62,10 +62,11 @@ pub fn parse_timespan_with_reference<Tz: TimeZone>(
     default: &DateTime<Tz>,
 ) -> Result<Timespan, String> {
     let (start, stop) = match timespan.split_once("..") {
-        Some((start, stop)) => (
-            parse_with_reference(start, default)?,
-            parse_with_reference(stop, default)?,
-        ),
+        Some((start, stop)) => {
+            let first = parse_with_reference(start, default)?;
+            let second = parse_with_reference(stop, &first)?;
+            (first, second)
+        }
         None => {
             let start = parse_with_reference(timespan, default)?;
             let stop = start + chrono::Duration::days(1);
@@ -114,5 +115,38 @@ mod tests {
     fn test_ts() {
         let dt = Utc.with_ymd_and_hms(2014, 7, 8, 9, 10, 11).unwrap(); // `2014-07-08T09:10:11Z`
         assert_eq!(pp("@1704150000", &dt), "Ok(2024-01-01T23:00:00+00:00)");
+    }
+
+    #[test]
+    fn test_timespan_end_uses_start_for_missing_fields() {
+        let reference = Utc.with_ymd_and_hms(2025, 10, 27, 6, 0, 0).unwrap();
+        let offset = FixedOffset::east_opt(0).unwrap();
+
+        let (start, stop) = super::parse_timespan_with_reference("10:15..30", &reference)
+            .expect("timespan parse");
+
+        let expected_start = offset.with_ymd_and_hms(2025, 10, 27, 10, 15, 0).unwrap();
+        let expected_stop = offset.with_ymd_and_hms(2025, 10, 27, 10, 30, 0).unwrap();
+
+        assert_eq!(start, expected_start);
+        assert_eq!(stop, expected_stop);
+    }
+
+    #[test]
+    fn test_timespan_full_start_keeps_end_on_same_day() {
+        let reference = Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
+        let offset = FixedOffset::east_opt(0).unwrap();
+
+        let (start, stop) = super::parse_timespan_with_reference(
+            "2025-10-27 10:30..11:30",
+            &reference,
+        )
+        .expect("timespan parse");
+
+        let expected_start = offset.with_ymd_and_hms(2025, 10, 27, 10, 30, 0).unwrap();
+        let expected_stop = offset.with_ymd_and_hms(2025, 10, 27, 11, 30, 0).unwrap();
+
+        assert_eq!(start, expected_start);
+        assert_eq!(stop, expected_stop);
     }
 }

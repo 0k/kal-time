@@ -137,3 +137,16 @@ $ kt-parse timespan 9h..10h 2025-10-22T09:10:11+00:00
 1761104400 2025-10-22 09:00:00 +00:00
 1761108000 2025-10-22 10:00:00 +00:00
 #+END_EXAMPLE
+
+Missing fields in the end segment now borrow the fully resolved start
+instant (commit ~1741734~), so terse ranges stay on the expected day.
+
+#+BEGIN_EXAMPLE
+$ kt-parse timespan 10:15..30 2025-10-27T09:00:00+00:00
+1761560100 2025-10-27 10:15:00 +00:00
+1761561000 2025-10-27 10:30:00 +00:00
+
+$ kt-parse timespan '2025-10-27 10:30..11:30' 2025-10-01T00:00:00+00:00
+1761561000 2025-10-27 10:30:00 +00:00
+1761564600 2025-10-27 11:30:00 +00:00
+#+END_EXAMPLE
