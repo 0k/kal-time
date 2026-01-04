@@ -25,24 +25,88 @@ lazy_static! {
     ];
 }
 
-pub fn parse_with_reference<Tz: TimeZone>(
+/// Generate suffix formats by progressively trimming the leftmost `%X` specifier
+/// and its trailing separator.
+///
+/// Example: "%Y-%m-%d %H:%M:%S" produces:
+///   ["%Y-%m-%d %H:%M:%S", "%m-%d %H:%M:%S", "%d %H:%M:%S", "%H:%M:%S", "%M:%S", "%S"]
+fn generate_suffix_formats(fmt: &str) -> Vec<String> {
+    let mut result = vec![fmt.to_string()];
+    let mut current = fmt;
+
+    while let Some(suffix) = trim_leftmost_specifier(current) {
+        if !suffix.is_empty() {
+            result.push(suffix.to_string());
+            current = suffix;
+        } else {
+            break;
+        }
+    }
+
+    result
+}
+
+/// Trim the leftmost `%X` specifier and its trailing separator from a format string.
+/// Returns the remaining suffix, or None if no specifier found.
+fn trim_leftmost_specifier(fmt: &str) -> Option<&str> {
+    // Find the first '%'
+    let pct_pos = fmt.find('%')?;
+
+    // Skip past the '%' and the specifier character
+    let after_pct = &fmt[pct_pos + 1..];
+    if after_pct.is_empty() {
+        return None;
+    }
+
+    // Skip the specifier character (handles single char specifiers like %Y, %m, %d, %H, %M, %S)
+    let after_spec = &after_pct[1..];
+
+    // Skip any non-'%' characters (the separator: '-', ':', ' ', 'h', 'm', etc.)
+    let next_pct = after_spec.find('%').unwrap_or(after_spec.len());
+    let suffix = &after_spec[next_pct..];
+
+    Some(suffix)
+}
+
+fn parse_with_formats<'a, Tz: TimeZone>(
     timestr: &str,
     reference: &DateTime<Tz>,
-) -> Result<DateTime<FixedOffset>, String> {
+    formats: &[&'a str],
+) -> Option<(DateTime<FixedOffset>, &'a str)> {
+    for format in formats {
+        log::trace!("Trying to parse {:?} with format {:?}", timestr, format);
+        if let Ok(dt) = parse::parse_partial(timestr, format, reference, true) {
+            return Some((dt, format));
+        }
+    }
+    None
+}
+
+fn parse_with_reference_internal<Tz: TimeZone>(
+    timestr: &str,
+    reference: &DateTime<Tz>,
+) -> Result<(DateTime<FixedOffset>, &'static str), String> {
     if timestr.is_empty() {
-        // XXXvlab: don't know a better way yet to make a
-        // DateTime<FixedOffset> from a DateTime<Local>
         log::trace!("Using reference: {:?}", reference);
-        return parse::parse_partial("", "", reference, false).map_err(|_| unreachable!());
+        let dt =
+            parse::parse_partial("", "", reference, false).expect("empty parse should never fail");
+        return Ok((dt, ""));
     }
 
     for format in TIMEPARSER_FORMATS.iter() {
         log::trace!("Trying to parse {:?} with format {:?}", timestr, format);
         if let Ok(dt) = parse::parse_partial(timestr, format, reference, true) {
-            return Ok(dt);
+            return Ok((dt, format));
         }
     }
     Err(format!("Could not parse time string: {:?}", timestr))
+}
+
+pub fn parse_with_reference<Tz: TimeZone>(
+    timestr: &str,
+    reference: &DateTime<Tz>,
+) -> Result<DateTime<FixedOffset>, String> {
+    parse_with_reference_internal(timestr, reference).map(|(dt, _fmt)| dt)
 }
 
 pub fn parse(timespan: &str) -> Result<DateTime<FixedOffset>, String> {
@@ -62,9 +126,20 @@ pub fn parse_timespan_with_reference<Tz: TimeZone>(
     default: &DateTime<Tz>,
 ) -> Result<Timespan, String> {
     let (start, stop) = match timespan.split_once("..") {
-        Some((start, stop)) => {
-            let first = parse_with_reference(start, default)?;
-            let second = parse_with_reference(stop, &first)?;
+        Some((start_str, stop_str)) => {
+            let (first, first_fmt) = parse_with_reference_internal(start_str, default)?;
+
+            // Try suffix formats first for the end part
+            let suffix_formats = generate_suffix_formats(first_fmt);
+            let suffix_refs: Vec<&str> = suffix_formats.iter().map(|s| s.as_str()).collect();
+
+            let second = if let Some((dt, _)) = parse_with_formats(stop_str, &first, &suffix_refs) {
+                dt
+            } else {
+                // Fall back to standard formats
+                parse_with_reference(stop_str, &first)?
+            };
+
             (first, second)
         }
         None => {
@@ -143,6 +218,22 @@ mod tests {
 
         let expected_start = offset.with_ymd_and_hms(2025, 10, 27, 10, 30, 0).unwrap();
         let expected_stop = offset.with_ymd_and_hms(2025, 10, 27, 11, 30, 0).unwrap();
+
+        assert_eq!(start, expected_start);
+        assert_eq!(stop, expected_stop);
+    }
+
+    #[test]
+    fn test_timespan_minutes_seconds_inherit_hour_from_start() {
+        let reference = Utc.with_ymd_and_hms(2025, 10, 1, 0, 0, 0).unwrap();
+        let offset = FixedOffset::east_opt(0).unwrap();
+
+        let (start, stop) =
+            super::parse_timespan_with_reference("2025-10-27 10:00:00..01:30", &reference)
+                .expect("timespan parse");
+
+        let expected_start = offset.with_ymd_and_hms(2025, 10, 27, 10, 0, 0).unwrap();
+        let expected_stop = offset.with_ymd_and_hms(2025, 10, 27, 10, 1, 30).unwrap();
 
         assert_eq!(start, expected_start);
         assert_eq!(stop, expected_stop);
