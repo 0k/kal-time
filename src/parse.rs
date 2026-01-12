@@ -2,7 +2,6 @@ use chrono::format::{ParseResult, Parsed};
 use chrono::offset::{LocalResult, Offset};
 use chrono::prelude::{Datelike, Timelike};
 use chrono::{DateTime, FixedOffset, TimeZone};
-use core::str;
 
 // Wrapper functions to standardize the return type to i64
 fn year<Tz: TimeZone>(dt: &DateTime<Tz>) -> i64 {
@@ -27,17 +26,18 @@ fn nanosecond<Tz: TimeZone>(dt: &DateTime<Tz>) -> i64 {
     dt.nanosecond() as i64
 }
 
-pub fn parse_partial<Tz: TimeZone>(
+pub fn parse_partial<Tz: TimeZone + 'static>(
     s: &str,
     fmt: &str,
     reference: &DateTime<Tz>,
     complete_with_zeroes: bool,
-) -> ParseResult<DateTime<FixedOffset>> {
+) -> Result<DateTime<FixedOffset>, String> {
     use chrono::format::Numeric::{Day, Hour, Minute, Month, Nanosecond, Second, Year};
 
     let mut parsed = Parsed::new();
     log::trace!("before: {:#?}", parsed);
-    chrono::format::parse(&mut parsed, s, chrono::format::StrftimeItems::new(fmt))?;
+    chrono::format::parse(&mut parsed, s, chrono::format::StrftimeItems::new(fmt))
+        .map_err(|e| e.to_string())?;
     log::trace!("after: {:#?}", parsed);
 
     type Getter<T, Tz> = fn(&DateTime<Tz>) -> T;
@@ -69,38 +69,70 @@ pub fn parse_partial<Tz: TimeZone>(
             };
             if replace {
                 if complete_with_zeroes {
-                    set(&mut parsed, min)?;
+                    set(&mut parsed, min).map_err(|e| e.to_string())?;
                 } else {
-                    set(&mut parsed, get(reference))?;
+                    set(&mut parsed, get(reference)).map_err(|e| e.to_string())?;
                 }
             } else {
                 complete_with_zeroes = false;
             }
         }
     }
-    // Resolve the final offset using the reference timezone at the target local datetime
-    // Build naive local datetime without applying the reference's current offset
-    let naive = parsed.to_naive_datetime_with_offset(0)?;
-
     // If input provided an absolute timestamp (@%s), treat it as UTC
     if parsed.timestamp.is_some() {
+        let naive = parsed
+            .to_naive_datetime_with_offset(0)
+            .map_err(|e| e.to_string())?;
         let off0 = FixedOffset::east_opt(0).unwrap();
         return Ok(off0.from_utc_datetime(&naive));
     }
 
-    // Map the naive local time into the system local timezone to pick the correct DST offset
-    // Choose resolution mode based on reference: UTC-like keeps UTC, otherwise use system local (with DST)
-    let dt_fixed: DateTime<FixedOffset> = if reference.offset().fix().local_minus_utc() == 0 {
-        let off0 = FixedOffset::east_opt(0).unwrap();
-        off0.from_utc_datetime(&naive)
-    } else {
-        match chrono::Local.from_local_datetime(&naive) {
-            LocalResult::Single(dt) => dt.with_timezone(&dt.offset().fix()),
-            LocalResult::Ambiguous(a, _b) => a.with_timezone(&a.offset().fix()), // pick earlier
-            LocalResult::None => unreachable!(),
+    // If the input contained an explicit timezone offset, use it directly
+    if let Some(offset_secs) = parsed.offset {
+        let naive = parsed
+            .to_naive_datetime_with_offset(offset_secs)
+            .map_err(|e| e.to_string())?;
+        let offset = FixedOffset::east_opt(offset_secs).unwrap();
+        return Ok(offset.from_local_datetime(&naive).unwrap());
+    }
+
+    let ref_offset = reference.offset().fix();
+    let naive = parsed
+        .to_naive_datetime_with_offset(0)
+        .map_err(|e| e.to_string())?;
+
+    // Check if reference uses Local timezone (no explicit offset) vs fixed offset.
+    // Local means we should determine the offset from TZ for the target date.
+    // Fixed offset (FixedOffset, Utc) means we use that explicit offset.
+    let ref_is_local = std::any::TypeId::of::<Tz>() == std::any::TypeId::of::<chrono::Local>();
+
+    log::trace!("Checking DST for naive={}, ref_offset={}, ref_is_local={}",
+                naive, ref_offset, ref_is_local);
+
+    if ref_is_local {
+        // Reference is Local - use TZ to determine correct offset for target date
+        let local_result = chrono::Local.from_local_datetime(&naive);
+        log::trace!("Local result: {:?}", local_result);
+        match local_result {
+            LocalResult::Single(local_dt) => {
+                let target_offset = local_dt.offset().fix();
+                Ok(target_offset.from_local_datetime(&naive).unwrap())
+            }
+            LocalResult::None => Err(format!(
+                "Non-existent time during DST transition: {} does not exist (clocks skip forward)",
+                naive
+            )),
+            LocalResult::Ambiguous(a, b) => Err(format!(
+                "Ambiguous time during DST transition: {} could be {} or {}",
+                naive,
+                a.format("%Y-%m-%d %H:%M:%S %z"),
+                b.format("%Y-%m-%d %H:%M:%S %z")
+            )),
         }
-    };
-    Ok(dt_fixed)
+    } else {
+        // Reference has explicit fixed offset - use it directly
+        Ok(ref_offset.from_local_datetime(&naive).unwrap())
+    }
 }
 
 #[cfg(test)]
@@ -108,7 +140,7 @@ mod tests {
     use super::*;
     use chrono::{Local, Utc};
 
-    fn pp<Tz: TimeZone>(
+    fn pp<Tz: TimeZone + 'static>(
         s: &str,
         fmt: &str,
         dt: &DateTime<Tz>,
@@ -149,14 +181,14 @@ mod tests {
 
     #[test]
     fn test_err() {
-        let dt = Local.with_ymd_and_hms(2014, 7, 8, 9, 10, 11).unwrap(); // `2014-07-08T09:10:11Z`
+        let dt = Local.with_ymd_and_hms(2014, 7, 8, 9, 10, 11).unwrap();
         assert_eq!(
             pp("9999999999", "%Y", &dt, false),
-            "Err(ParseError(TooLong))"
+            "Err(\"trailing input\")"
         );
         assert_eq!(
             pp("2015 toto", "%Y %M", &dt, false),
-            "Err(ParseError(Invalid))"
+            "Err(\"input contains invalid characters\")"
         );
     }
 

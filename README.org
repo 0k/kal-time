@@ -17,6 +17,196 @@ This is more a tiny piece of code I use between many different
 project. It has no ambition to become anything big, and the quality is
 alpha level.
 
+* Supported Formats
+
+The library accepts a variety of date/time formats, listed here from
+most specific to least specific. Formats are tried in order until one
+matches.
+
+All examples below use this reference: ~2024-03-20T11:45:30+05:00~
+
+When the input lacks an explicit timezone, the offset from the
+reference is used. This makes parsing deterministic regardless of the
+system's local timezone.
+
+** ISO 8601 formats (with timezone)
+
+Full ISO 8601 compliance with explicit timezone offset or UTC marker.
+The provided timezone is preserved in the output (reference ignored):
+
+#+BEGIN_EXAMPLE
+2025-01-12T14:30:00+01:00   => 2025-01-12 14:30:00 +01:00
+2025-01-12T14:30:00Z        => 2025-01-12 14:30:00 +00:00
+2025-01-12T14:30+01:00      => 2025-01-12 14:30:00 +01:00
+2025-01-12T14:30Z           => 2025-01-12 14:30:00 +00:00
+2025-01-12 14:30:00+01:00   => 2025-01-12 14:30:00 +01:00
+2025-01-12 14:30:00Z        => 2025-01-12 14:30:00 +00:00
+#+END_EXAMPLE
+
+** ISO 8601 formats (no timezone)
+
+Standard ISO formats without timezone—offset comes from reference (+05:00):
+
+#+BEGIN_EXAMPLE
+2025-01-12T14:30:00         => 2025-01-12 14:30:00 +05:00
+2025-01-12T14:30            => 2025-01-12 14:30:00 +05:00
+2025-01-12 14:30:00         => 2025-01-12 14:30:00 +05:00
+2025-01-12 14:30            => 2025-01-12 14:30:00 +05:00
+2025-01-12                  => 2025-01-12 00:00:00 +05:00
+#+END_EXAMPLE
+
+** Partial date formats
+
+Missing fields filled from reference (year=2024, month=03, day=20, offset=+05:00):
+
+#+BEGIN_EXAMPLE
+01-12                       => 2024-01-12 00:00:00 +05:00  (year, offset from ref)
+01/12                       => 2024-01-12 00:00:00 +05:00  (year, offset from ref)
+01-12 14:30                 => 2024-01-12 14:30:00 +05:00  (year, offset from ref)
+01-12 14:30:45              => 2024-01-12 14:30:45 +05:00  (year, offset from ref)
+15 14:30                    => 2024-03-15 14:30:00 +05:00  (year+month, offset from ref)
+#+END_EXAMPLE
+
+** Time-only formats
+
+Date (2024-03-20) and offset (+05:00) come from reference:
+
+#+BEGIN_EXAMPLE
+14:30:59                    => 2024-03-20 14:30:59 +05:00
+14:30                       => 2024-03-20 14:30:00 +05:00
+#+END_EXAMPLE
+
+** Terse/human-friendly formats
+
+Missing fields filled from reference (hour=11, minute=45, offset=+05:00):
+
+#+BEGIN_EXAMPLE
+14h30                       => 2024-03-20 14:30:00 +05:00  (date, offset from ref)
+9h                          => 2024-03-20 09:00:00 +05:00  (date, offset from ref)
+30m                         => 2024-03-20 11:30:00 +05:00  (date+hour, offset from ref)
+15 14h30                    => 2024-03-15 14:30:00 +05:00  (year+month, offset from ref)
+15 9h                       => 2024-03-15 09:00:00 +05:00  (year+month, offset from ref)
+#+END_EXAMPLE
+
+** Unix timestamp
+
+Prefix with ~@~ for epoch seconds (always interpreted as UTC, reference ignored):
+
+#+BEGIN_EXAMPLE
+@1736692200                 => 2025-01-12 14:30:00 +00:00
+#+END_EXAMPLE
+
+** Natural language (via chrono-english)
+
+English expressions for relative dates and times (offset +05:00 from ref):
+
+#+BEGIN_EXAMPLE
+yesterday                   => 2024-03-19 11:45:30 +05:00  (1 day before ref)
+tomorrow                    => 2024-03-21 11:45:30 +05:00  (1 day after ref)
+friday                      => 2024-03-22 00:00:00 +05:00  (this friday)
+last friday                 => 2024-03-15 00:00:00 +05:00
+next monday                 => 2024-04-01 00:00:00 +05:00
+2 days ago                  => 2024-03-18 11:45:30 +05:00
+3 hours ago                 => 2024-03-20 08:45:30 +05:00
+1 hour                      => 2024-03-20 12:45:30 +05:00  (1 hour from ref)
+friday 8pm                  => 2024-03-22 20:00:00 +05:00
+april 1                     => 2024-04-01 00:00:00 +05:00
+1 april                     => 2024-04-01 00:00:00 +05:00
+#+END_EXAMPLE
+
+Shorthand intervals are also supported: ~3h~, ~2d~, ~15m~, ~1y~.
+
+* Reference Types and Offset Behavior
+
+The library distinguishes between two types of references:
+
+** Fixed offset reference (~DateTime<FixedOffset>~ or ~DateTime<Utc>~)
+
+When the reference has an explicit fixed offset, that offset is used
+for all parsed times (unless the input itself specifies a timezone).
+No DST checking is performed since the offset is explicit.
+
+#+BEGIN_SRC rust
+use chrono::FixedOffset;
+use kal_time::parse_with_reference;
+
+let offset = FixedOffset::east_opt(5 * 3600).unwrap(); // +05:00
+let reference = offset.with_ymd_and_hms(2024, 3, 20, 12, 0, 0).unwrap();
+let parsed = parse_with_reference("2025-07-15 14:30", &reference)?;
+// => 2025-07-15 14:30:00 +05:00 (offset from reference, no DST check)
+#+END_SRC
+
+** Local reference (~DateTime<Local>~)
+
+When the reference is a ~DateTime<Local>~, the library uses the system
+timezone (~TZ~ environment variable) to determine the correct offset
+for the target date. This enables DST-aware parsing.
+
+#+BEGIN_SRC rust
+use chrono::Local;
+use kal_time::parse_with_reference;
+
+let reference = Local::now();
+let parsed = parse_with_reference("2025-07-15 14:30", &reference)?;
+// => 2025-07-15 14:30:00 +02:00 (in Europe/Paris summer time)
+#+END_SRC
+
+* DST Transition Handling
+
+When using a ~DateTime<Local>~ reference (no explicit offset), the
+library checks for problematic times during Daylight Saving Time
+transitions. Two cases are detected:
+
+** Ambiguous times (fall back)
+
+In regions that observe DST, clocks "fall back" once a year, causing a
+range of local times to occur twice.
+
+For example, in ~Europe/Paris~ on the last Sunday of October, clocks
+move from 03:00 CEST (+02:00) back to 02:00 CET (+01:00). This means
+times between 02:00:00 and 03:00:00 are ambiguous—they could refer to
+either the CEST or CET instance.
+
+#+BEGIN_EXAMPLE
+$ TZ=Europe/Paris kt-parse time "2025-10-26 02:30:00"
+Error: Ambiguous time during DST transition: 2025-10-26 02:30:00 could be
+       2025-10-26 02:30:00 +0200 or 2025-10-26 02:30:00 +0100
+#+END_EXAMPLE
+
+** Non-existent times (spring forward)
+
+Conversely, clocks "spring forward" once a year, skipping a range of
+local times entirely.
+
+For example, in ~Europe/Paris~ on the last Sunday of March, clocks
+jump from 02:00 CET (+01:00) to 03:00 CEST (+02:00). Times between
+02:00:00 and 03:00:00 simply do not exist.
+
+#+BEGIN_EXAMPLE
+$ TZ=Europe/Paris kt-parse time "2025-03-30 02:30:00"
+Error: Non-existent time during DST transition: 2025-03-30 02:30:00 does not exist
+       (clocks skip forward)
+#+END_EXAMPLE
+
+** Resolving DST issues
+
+To resolve ambiguity or specify a non-existent time, use an explicit
+timezone offset:
+
+#+BEGIN_EXAMPLE
+$ kt-parse time "2025-10-26T02:30:00+02:00"   # CEST (before fallback)
+$ kt-parse time "2025-10-26T02:30:00+01:00"   # CET (after fallback)
+#+END_EXAMPLE
+
+Times outside the problematic windows parse normally:
+
+#+BEGIN_EXAMPLE
+$ TZ=Europe/Paris kt-parse time "2025-10-26 01:59:59"  # Before fall-back window
+$ TZ=Europe/Paris kt-parse time "2025-10-26 03:00:01"  # After fall-back window
+$ TZ=Europe/Paris kt-parse time "2025-03-30 01:59:59"  # Before spring-forward gap
+$ TZ=Europe/Paris kt-parse time "2025-03-30 03:00:00"  # After spring-forward gap
+#+END_EXAMPLE
+
 * Build & Test
 
 - ~cargo build~ — compile the library and surface warnings.
