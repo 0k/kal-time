@@ -107,7 +107,7 @@ fn parse_reference(s: &str) -> Result<Reference, String> {
                 chrono::LocalResult::Single(dt) => return Ok(Reference::Local(dt)),
                 chrono::LocalResult::Ambiguous(dt, _) => return Ok(Reference::Local(dt)),
                 chrono::LocalResult::None => {
-                    return Err(format!("Reference time does not exist (DST gap): {s}"))
+                    return Err(format!("Reference time does not exist (DST gap): {s}"));
                 }
             }
         }
@@ -155,7 +155,9 @@ mod tests {
     fn test_local_winter_time() {
         // TZ=Europe/Paris kt-parse time "2025-01-06 11:45"
         // => 1736160300 2025-01-06 11:45:00 +01:00
-        unsafe { std::env::set_var("TZ", "Europe/Paris"); }
+        unsafe {
+            std::env::set_var("TZ", "Europe/Paris");
+        }
         tzset_refresh();
 
         let result = kt_parse_time("2025-01-06 11:45", None);
@@ -166,7 +168,9 @@ mod tests {
     fn test_local_summer_time() {
         // TZ=Europe/Paris kt-parse time "2025-06-06 11:45"
         // => 1749203100 2025-06-06 11:45:00 +02:00
-        unsafe { std::env::set_var("TZ", "Europe/Paris"); }
+        unsafe {
+            std::env::set_var("TZ", "Europe/Paris");
+        }
         tzset_refresh();
 
         let result = kt_parse_time("2025-06-06 11:45", None);
@@ -178,7 +182,9 @@ mod tests {
         // TZ=Europe/Paris kt-parse time "2025-06-06 11:45" "2025-01-01 11:00:00"
         // Reference without offset → Local → DST-aware for target date
         // => 1749203100 2025-06-06 11:45:00 +02:00
-        unsafe { std::env::set_var("TZ", "Europe/Paris"); }
+        unsafe {
+            std::env::set_var("TZ", "Europe/Paris");
+        }
         tzset_refresh();
 
         let result = kt_parse_time("2025-06-06 11:45", Some("2025-01-01 11:00:00"));
@@ -190,7 +196,9 @@ mod tests {
         // TZ=Europe/Paris kt-parse time "2025-06-06 11:45" "2025-01-01 11:00:00+05:30"
         // Reference with explicit offset → use that offset
         // => 1749190500 2025-06-06 11:45:00 +05:30
-        unsafe { std::env::set_var("TZ", "Europe/Paris"); }
+        unsafe {
+            std::env::set_var("TZ", "Europe/Paris");
+        }
         tzset_refresh();
 
         let result = kt_parse_time("2025-06-06 11:45", Some("2025-01-01 11:00:00+05:30"));

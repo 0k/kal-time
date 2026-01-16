@@ -1,0 +1,6 @@
+NAME="kal-time"
+DESCRIPTION="Rust library for parsing human-friendly time and timespan expressions"
+EMAIL="valentin.lab@kalysto.org"
+AUTHOR="Valentin Lab"
+AUTHOR_EMAIL="$AUTHOR <$EMAIL>"
+FILES="Cargo.toml"

@@ -1,6 +1,6 @@
-use chrono::{DateTime, FixedOffset, TimeZone};
 use chrono::offset::Offset;
-use chrono_english::{parse_date_string, Dialect};
+use chrono::{DateTime, FixedOffset, TimeZone};
+use chrono_english::{Dialect, parse_date_string};
 use lazy_static::lazy_static;
 
 mod parse;
@@ -276,17 +276,41 @@ mod tests {
         let dt = offset.with_ymd_and_hms(2024, 3, 20, 11, 45, 30).unwrap();
 
         // === ISO 8601 with timezone (reference ignored) ===
-        assert_eq!(pp("2025-01-12T14:30:00+01:00", &dt), "Ok(2025-01-12T14:30:00+01:00)");
-        assert_eq!(pp("2025-01-12T14:30:00Z", &dt), "Ok(2025-01-12T14:30:00+00:00)");
-        assert_eq!(pp("2025-01-12T14:30+01:00", &dt), "Ok(2025-01-12T14:30:00+01:00)");
-        assert_eq!(pp("2025-01-12T14:30Z", &dt), "Ok(2025-01-12T14:30:00+00:00)");
-        assert_eq!(pp("2025-01-12 14:30:00+01:00", &dt), "Ok(2025-01-12T14:30:00+01:00)");
-        assert_eq!(pp("2025-01-12 14:30:00Z", &dt), "Ok(2025-01-12T14:30:00+00:00)");
+        assert_eq!(
+            pp("2025-01-12T14:30:00+01:00", &dt),
+            "Ok(2025-01-12T14:30:00+01:00)"
+        );
+        assert_eq!(
+            pp("2025-01-12T14:30:00Z", &dt),
+            "Ok(2025-01-12T14:30:00+00:00)"
+        );
+        assert_eq!(
+            pp("2025-01-12T14:30+01:00", &dt),
+            "Ok(2025-01-12T14:30:00+01:00)"
+        );
+        assert_eq!(
+            pp("2025-01-12T14:30Z", &dt),
+            "Ok(2025-01-12T14:30:00+00:00)"
+        );
+        assert_eq!(
+            pp("2025-01-12 14:30:00+01:00", &dt),
+            "Ok(2025-01-12T14:30:00+01:00)"
+        );
+        assert_eq!(
+            pp("2025-01-12 14:30:00Z", &dt),
+            "Ok(2025-01-12T14:30:00+00:00)"
+        );
 
         // === ISO 8601 no timezone (offset +05:00 from reference) ===
-        assert_eq!(pp("2025-01-12T14:30:00", &dt), "Ok(2025-01-12T14:30:00+05:00)");
+        assert_eq!(
+            pp("2025-01-12T14:30:00", &dt),
+            "Ok(2025-01-12T14:30:00+05:00)"
+        );
         assert_eq!(pp("2025-01-12T14:30", &dt), "Ok(2025-01-12T14:30:00+05:00)");
-        assert_eq!(pp("2025-01-12 14:30:00", &dt), "Ok(2025-01-12T14:30:00+05:00)");
+        assert_eq!(
+            pp("2025-01-12 14:30:00", &dt),
+            "Ok(2025-01-12T14:30:00+05:00)"
+        );
         assert_eq!(pp("2025-01-12 14:30", &dt), "Ok(2025-01-12T14:30:00+05:00)");
         assert_eq!(pp("2025-01-12", &dt), "Ok(2025-01-12T00:00:00+05:00)");
 
@@ -303,10 +327,10 @@ mod tests {
 
         // === Terse formats ===
         assert_eq!(pp("14h30", &dt), "Ok(2024-03-20T14:30:00+05:00)"); // date from ref
-        assert_eq!(pp("9h", &dt), "Ok(2024-03-20T09:00:00+05:00)");    // date from ref
-        assert_eq!(pp("30m", &dt), "Ok(2024-03-20T11:30:00+05:00)");   // date+hour(11) from ref
+        assert_eq!(pp("9h", &dt), "Ok(2024-03-20T09:00:00+05:00)"); // date from ref
+        assert_eq!(pp("30m", &dt), "Ok(2024-03-20T11:30:00+05:00)"); // date+hour(11) from ref
         assert_eq!(pp("15 14h30", &dt), "Ok(2024-03-15T14:30:00+05:00)"); // year+month from ref
-        assert_eq!(pp("15 9h", &dt), "Ok(2024-03-15T09:00:00+05:00)");    // year+month from ref
+        assert_eq!(pp("15 9h", &dt), "Ok(2024-03-15T09:00:00+05:00)"); // year+month from ref
 
         // === Unix timestamp (always UTC, reference ignored) ===
         assert_eq!(pp("@1736692200", &dt), "Ok(2025-01-12T14:30:00+00:00)");
@@ -360,8 +384,16 @@ mod tests {
         let b = super::parse_with_reference(s, &ref_plus5_30).expect("+05:30 ref parse");
 
         // Offset comes from reference (not from system local TZ)
-        assert_eq!(a.offset().local_minus_utc(), 5 * 3600, "should use +05:00 from ref");
-        assert_eq!(b.offset().local_minus_utc(), 5 * 3600 + 1800, "should use +05:30 from ref");
+        assert_eq!(
+            a.offset().local_minus_utc(),
+            5 * 3600,
+            "should use +05:00 from ref"
+        );
+        assert_eq!(
+            b.offset().local_minus_utc(),
+            5 * 3600 + 1800,
+            "should use +05:30 from ref"
+        );
         // Same wall time but different offsets = different instants
         assert_ne!(a, b);
     }
@@ -377,17 +409,21 @@ mod tests {
         tzset_refresh();
 
         // Use Local reference to trigger DST-aware parsing
-        let reference = chrono::Local.with_ymd_and_hms(2025, 10, 26, 0, 0, 0).unwrap();
+        let reference = chrono::Local
+            .with_ymd_and_hms(2025, 10, 26, 0, 0, 0)
+            .unwrap();
 
         // Check what Local thinks about this time
-        let naive = chrono::NaiveDateTime::parse_from_str(
-            "2025-10-26 02:30:00",
-            "%Y-%m-%d %H:%M:%S",
-        )
-        .unwrap();
+        let naive =
+            chrono::NaiveDateTime::parse_from_str("2025-10-26 02:30:00", "%Y-%m-%d %H:%M:%S")
+                .unwrap();
         let local_result = chrono::Local.from_local_datetime(&naive);
-        eprintln!("TZ={:?}, Local result for {}: {:?}",
-            std::env::var("TZ"), naive, local_result);
+        eprintln!(
+            "TZ={:?}, Local result for {}: {:?}",
+            std::env::var("TZ"),
+            naive,
+            local_result
+        );
 
         // 2:30 AM on Oct 26 2025 is ambiguous - should error
         let result = super::parse_with_reference("2025-10-26 02:30:00", &reference);
@@ -403,15 +439,27 @@ mod tests {
 
         // 1:59:59 AM is unambiguous (before transition)
         let before = super::parse_with_reference("2025-10-26 01:59:59", &reference);
-        assert!(before.is_ok(), "Time before DST transition should parse: {:?}", before);
+        assert!(
+            before.is_ok(),
+            "Time before DST transition should parse: {:?}",
+            before
+        );
 
         // 3:00:00 AM is also ambiguous (it exists as both 3:00 CEST before fallback and 3:00 CET after)
         let at_three = super::parse_with_reference("2025-10-26 03:00:00", &reference);
-        assert!(at_three.is_err(), "3:00 AM should also be ambiguous: {:?}", at_three);
+        assert!(
+            at_three.is_err(),
+            "3:00 AM should also be ambiguous: {:?}",
+            at_three
+        );
 
         // 3:00:01 AM is unambiguous (just after the ambiguous window ends)
         let after = super::parse_with_reference("2025-10-26 03:00:01", &reference);
-        assert!(after.is_ok(), "Time after DST transition should parse: {:?}", after);
+        assert!(
+            after.is_ok(),
+            "Time after DST transition should parse: {:?}",
+            after
+        );
     }
 
     #[test]
@@ -424,7 +472,9 @@ mod tests {
         tzset_refresh();
 
         // Use Local reference to trigger DST-aware parsing
-        let reference = chrono::Local.with_ymd_and_hms(2025, 3, 30, 0, 0, 0).unwrap();
+        let reference = chrono::Local
+            .with_ymd_and_hms(2025, 3, 30, 0, 0, 0)
+            .unwrap();
 
         // 2:30 AM on March 30 2025 doesn't exist - should error
         let result = super::parse_with_reference("2025-03-30 02:30:00", &reference);
@@ -440,11 +490,19 @@ mod tests {
 
         // 1:59:59 AM is fine (before the gap)
         let before = super::parse_with_reference("2025-03-30 01:59:59", &reference);
-        assert!(before.is_ok(), "Time before DST gap should parse: {:?}", before);
+        assert!(
+            before.is_ok(),
+            "Time before DST gap should parse: {:?}",
+            before
+        );
 
         // 3:00:00 AM is fine (after the gap)
         let after = super::parse_with_reference("2025-03-30 03:00:00", &reference);
-        assert!(after.is_ok(), "Time after DST gap should parse: {:?}", after);
+        assert!(
+            after.is_ok(),
+            "Time after DST gap should parse: {:?}",
+            after
+        );
     }
 
     fn tzset_refresh() {

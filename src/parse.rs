@@ -106,8 +106,12 @@ pub fn parse_partial<Tz: TimeZone + 'static>(
     // Fixed offset (FixedOffset, Utc) means we use that explicit offset.
     let ref_is_local = std::any::TypeId::of::<Tz>() == std::any::TypeId::of::<chrono::Local>();
 
-    log::trace!("Checking DST for naive={}, ref_offset={}, ref_is_local={}",
-                naive, ref_offset, ref_is_local);
+    log::trace!(
+        "Checking DST for naive={}, ref_offset={}, ref_is_local={}",
+        naive,
+        ref_offset,
+        ref_is_local
+    );
 
     if ref_is_local {
         // Reference is Local - use TZ to determine correct offset for target date
