@@ -48,17 +48,13 @@ This is a small library.
 
 - Run `cargo test -- --nocapture` when debugging to surface trace logs during runs.
 
-## Commit & Pull Request Guidelines
+## Pull Request Guidelines
 
-- Start commit subjects with an imperative verb (e.g., `Add parser
-  fallback`); keep them under 72 characters.
+Group related changes: update code, formatter output, and tests in
+the same commit to avoid red builds.
 
-- Group related changes: update code, formatter output, and tests in
-  the same commit to avoid red builds.
+PRs should link any tracking issues, summarize time parsing behaviors
+touched, and include screenshots or logs if behavior changes.
 
-- PRs should link any tracking issues, summarize time parsing
-  behaviors touched, and include screenshots or logs if behavior
-  changes.
-
-- Confirm `cargo fmt`, `cargo clippy`, and `cargo test` succeed before
-  requesting review.
+Confirm `cargo fmt`, `cargo clippy`, and `cargo test` succeed before
+requesting review.
