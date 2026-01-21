@@ -167,11 +167,10 @@ move from 03:00 CEST (+02:00) back to 02:00 CET (+01:00). This means
 times between 02:00:00 and 03:00:00 are ambiguous—they could refer to
 either the CEST or CET instance.
 
-#+BEGIN_EXAMPLE
+#+begin_src docshtest
 $ TZ=Europe/Paris kt-parse time "2025-10-26 02:30:00"
-Error: Ambiguous time during DST transition: 2025-10-26 02:30:00 could be
-       2025-10-26 02:30:00 +0200 or 2025-10-26 02:30:00 +0100
-#+END_EXAMPLE
+Failed to parse time: Ambiguous time during DST transition: 2025-10-26 02:30:00 could be 2025-10-26 02:30:00 +0100 or 2025-10-26 02:30:00 +0200
+#+end_src
 
 ** Non-existent times (spring forward)
 
@@ -182,30 +181,35 @@ For example, in ~Europe/Paris~ on the last Sunday of March, clocks
 jump from 02:00 CET (+01:00) to 03:00 CEST (+02:00). Times between
 02:00:00 and 03:00:00 simply do not exist.
 
-#+BEGIN_EXAMPLE
+#+begin_src docshtest
 $ TZ=Europe/Paris kt-parse time "2025-03-30 02:30:00"
-Error: Non-existent time during DST transition: 2025-03-30 02:30:00 does not exist
-       (clocks skip forward)
-#+END_EXAMPLE
+Failed to parse time: Non-existent time during DST transition: 2025-03-30 02:30:00 does not exist (clocks skip forward)
+#+end_src
 
 ** Resolving DST issues
 
 To resolve ambiguity or specify a non-existent time, use an explicit
 timezone offset:
 
-#+BEGIN_EXAMPLE
-$ kt-parse time "2025-10-26T02:30:00+02:00"   # CEST (before fallback)
-$ kt-parse time "2025-10-26T02:30:00+01:00"   # CET (after fallback)
-#+END_EXAMPLE
+#+begin_src docshtest
+$ kt-parse time "2025-10-26T02:30:00+02:00"
+1761438600 2025-10-26 02:30:00 +02:00
+$ kt-parse time "2025-10-26T02:30:00+01:00"
+1761442200 2025-10-26 02:30:00 +01:00
+#+end_src
 
 Times outside the problematic windows parse normally:
 
-#+BEGIN_EXAMPLE
-$ TZ=Europe/Paris kt-parse time "2025-10-26 01:59:59"  # Before fall-back window
-$ TZ=Europe/Paris kt-parse time "2025-10-26 03:00:01"  # After fall-back window
-$ TZ=Europe/Paris kt-parse time "2025-03-30 01:59:59"  # Before spring-forward gap
-$ TZ=Europe/Paris kt-parse time "2025-03-30 03:00:00"  # After spring-forward gap
-#+END_EXAMPLE
+#+begin_src docshtest
+$ TZ=Europe/Paris kt-parse time "2025-10-26 01:59:59"
+1761436799 2025-10-26 01:59:59 +02:00
+$ TZ=Europe/Paris kt-parse time "2025-10-26 03:00:01"
+1761444001 2025-10-26 03:00:01 +01:00
+$ TZ=Europe/Paris kt-parse time "2025-03-30 01:59:59"
+1743296399 2025-03-30 01:59:59 +01:00
+$ TZ=Europe/Paris kt-parse time "2025-03-30 03:00:00"
+1743296400 2025-03-30 03:00:00 +02:00
+#+end_src
 
 * Build & Test
 
@@ -309,60 +313,58 @@ Use the ~-F~ (or ~--format~) flag to select a specific format:
 - ~ts~: Unix timestamp only
 - ~iso~: ISO 8601 format
 
-#+BEGIN_EXAMPLE
-$ kt-parse time "2025-01-06 11:45"
+#+begin_src docshtest
+$ kt-parse time "2025-01-06 11:45" "2025-01-06T00:00:00+01:00"
 1736160300 2025-01-06 11:45:00 +01:00
-
-$ kt-parse -F ts time "2025-01-06 11:45"
+$ kt-parse -F ts time "2025-01-06 11:45" "2025-01-06T00:00:00+01:00"
 1736160300
-
-$ kt-parse -F iso time "2025-01-06 11:45"
+$ kt-parse -F iso time "2025-01-06 11:45" "2025-01-06T00:00:00+01:00"
 2025-01-06T11:45:00+01:00
-#+END_EXAMPLE
+#+end_src
 
 The format flag works with both ~time~ and ~timespan~ commands.
 
 ** Parse a time with the current clock
 
-#+BEGIN_EXAMPLE
-$ kt-parse time 9h
-1761104400 2025-10-22 09:00:00 +00:00
-#+END_EXAMPLE
+When no reference is provided, the current time is used. Output varies
+based on when you run it:
+
+#+begin_example
+kt-parse time 9h
+#+end_example
 
 ** Parse a time with an explicit reference
 
 You can supply a fully specified reference (RFC3339 or similar) when you
 need deterministic results regardless of the machine clock.
 
-#+BEGIN_EXAMPLE
+#+begin_src docshtest
 $ kt-parse time 30m 2025-10-22T09:10:11+00:00
-1761105011 2025-10-22 09:30:11 +00:00
-#+END_EXAMPLE
+1761125400 2025-10-22 09:30:00 +00:00
+#+end_src
 
 ** Parse a timespan
 
 Timespans print two lines: start then end. Relative fields reuse the
 reference on a per-field basis.
 
-#+BEGIN_EXAMPLE
+#+begin_src docshtest
 $ kt-parse timespan 9h..10h 2025-10-22T09:10:11+00:00
-1761104400 2025-10-22 09:00:00 +00:00
-1761108000 2025-10-22 10:00:00 +00:00
-#+END_EXAMPLE
+1761123600 2025-10-22 09:00:00 +00:00
+1761127200 2025-10-22 10:00:00 +00:00
+#+end_src
 
 Missing fields in the end segment now borrow the fully resolved start
 instant (commit ~1741734~), so terse ranges stay on the expected day.
 
-#+BEGIN_EXAMPLE
+#+begin_src docshtest
 $ kt-parse timespan 10:15..30 2025-10-27T09:00:00+00:00
 1761560100 2025-10-27 10:15:00 +00:00
 1761561000 2025-10-27 10:30:00 +00:00
-
 $ kt-parse timespan '2025-10-27 10:30..11:30' 2025-10-01T00:00:00+00:00
 1761561000 2025-10-27 10:30:00 +00:00
 1761564600 2025-10-27 11:30:00 +00:00
-
 $ kt-parse timespan '2025-10-27 10:00:00..01:30' 2025-10-01T00:00:00+00:00
 1761559200 2025-10-27 10:00:00 +00:00
 1761559290 2025-10-27 10:01:30 +00:00
-#+END_EXAMPLE
+#+end_src
