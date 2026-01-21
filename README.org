@@ -300,6 +300,28 @@ shell pipelines.
 
 Run ~kt-parse --help~ for a quick usage reminder.
 
+** Output formats
+
+By default, ~kt-parse~ outputs both timestamp and human-readable date.
+Use the ~-F~ (or ~--format~) flag to select a specific format:
+
+- ~full~ (default): ~<timestamp> <YYYY-MM-DD> <HH:MM:SS> <+TZ>~
+- ~ts~: Unix timestamp only
+- ~iso~: ISO 8601 format
+
+#+BEGIN_EXAMPLE
+$ kt-parse time "2025-01-06 11:45"
+1736160300 2025-01-06 11:45:00 +01:00
+
+$ kt-parse -F ts time "2025-01-06 11:45"
+1736160300
+
+$ kt-parse -F iso time "2025-01-06 11:45"
+2025-01-06T11:45:00+01:00
+#+END_EXAMPLE
+
+The format flag works with both ~time~ and ~timespan~ commands.
+
 ** Parse a time with the current clock
 
 #+BEGIN_EXAMPLE
