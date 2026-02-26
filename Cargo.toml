@@ -16,3 +16,4 @@ chrono-english = "0.1"
 fern = "0.6.2"
 log = "0.4.20"
 lazy_static = "1.4.0"
+two_timer = { version = "2.2", features = ["small_grammar"] }

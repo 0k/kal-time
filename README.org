@@ -96,7 +96,7 @@ Prefix with ~@~ for epoch seconds (always interpreted as UTC, reference ignored)
 @1736692200                 => 2025-01-12 14:30:00 +00:00
 #+END_EXAMPLE
 
-** Natural language (via chrono-english)
+** Natural language
 
 English expressions for relative dates and times (offset +05:00 from ref):
 
@@ -296,6 +296,49 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 #+END_SRC
+
+*** Natural language timespans
+
+When ~parse_timespan~ receives a natural language expression (without
+~..~), it returns calendar-aligned full periods instead of a single
+point offset by 24 hours. This is powered by the ~two-timer~ crate.
+
+For example, ~"today"~ returns midnight-to-midnight of the current
+day, ~"this week"~ returns Monday-to-Monday, ~"this month"~ returns
+the 1st-to-1st, etc.
+
+All examples use reference ~2024-03-20T11:45:30+05:00~ (a Wednesday):
+
+#+begin_src docshtest
+$ kt-parse timespan today 2024-03-20T11:45:30+05:00
+1710874800 2024-03-20 00:00:00 +05:00
+1710961200 2024-03-21 00:00:00 +05:00
+$ kt-parse timespan yesterday 2024-03-20T11:45:30+05:00
+1710788400 2024-03-19 00:00:00 +05:00
+1710874800 2024-03-20 00:00:00 +05:00
+$ kt-parse timespan tomorrow 2024-03-20T11:45:30+05:00
+1710961200 2024-03-21 00:00:00 +05:00
+1711047600 2024-03-22 00:00:00 +05:00
+$ kt-parse timespan "this week" 2024-03-20T11:45:30+05:00
+1710702000 2024-03-18 00:00:00 +05:00
+1711306800 2024-03-25 00:00:00 +05:00
+$ kt-parse timespan "last week" 2024-03-20T11:45:30+05:00
+1710097200 2024-03-11 00:00:00 +05:00
+1710702000 2024-03-18 00:00:00 +05:00
+$ kt-parse timespan "this month" 2024-03-20T11:45:30+05:00
+1709233200 2024-03-01 00:00:00 +05:00
+1711911600 2024-04-01 00:00:00 +05:00
+$ kt-parse timespan "last month" 2024-03-20T11:45:30+05:00
+1706727600 2024-02-01 00:00:00 +05:00
+1709233200 2024-03-01 00:00:00 +05:00
+$ kt-parse timespan "this year" 2024-03-20T11:45:30+05:00
+1704049200 2024-01-01 00:00:00 +05:00
+1735671600 2025-01-01 00:00:00 +05:00
+#+end_src
+
+Note: ~parse~ (single time point) is unaffected — ~"today"~ in that
+context still returns the reference time ± 1 day, preserving the
+clock component.
 
 * Command-line Utility
 

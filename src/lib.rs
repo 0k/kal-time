@@ -1,7 +1,8 @@
 use chrono::offset::Offset;
-use chrono::{DateTime, FixedOffset, TimeZone};
-use chrono_english::{Dialect, parse_date_string};
+use chrono::{DateTime, FixedOffset, NaiveDateTime, TimeZone};
+use chrono_english::{parse_date_string, Dialect};
 use lazy_static::lazy_static;
+use two_timer::{parse as two_timer_parse, Config as TwoTimerConfig};
 
 mod parse;
 
@@ -172,9 +173,50 @@ pub fn parse_timespan_with_reference<Tz: TimeZone + 'static>(
             (first, second)
         }
         None => {
-            let start = parse_with_reference(timespan, default)?;
-            let stop = start + chrono::Duration::days(1);
-            (start, stop)
+            // Try our own format parser first (fast path for ISO dates,
+            // terse formats like "9h", timestamps, etc.).
+            match parse_with_reference_internal(timespan, default) {
+                Ok((dt, fmt)) if fmt != "chrono-english" => {
+                    // Format-based match — single point + 24h
+                    let stop = dt + chrono::Duration::days(1);
+                    (dt, stop)
+                }
+                Ok(_) | Err(_) => {
+                    // Natural language (chrono-english matched) or nothing
+                    // matched at all — try two-timer for calendar-aligned ranges.
+                    let ref_offset = default.offset().fix();
+                    let naive_now: NaiveDateTime = default.with_timezone(&ref_offset).naive_local();
+                    let config = TwoTimerConfig::new().now(naive_now);
+
+                    if let Ok((start_naive, end_naive, _)) = two_timer_parse(timespan, Some(config))
+                    {
+                        let start_fixed = ref_offset
+                            .from_local_datetime(&start_naive)
+                            .single()
+                            .ok_or_else(|| {
+                                format!(
+                                    "Ambiguous or non-existent local time for start: {}",
+                                    start_naive
+                                )
+                            })?;
+                        let stop_fixed = ref_offset
+                            .from_local_datetime(&end_naive)
+                            .single()
+                            .ok_or_else(|| {
+                                format!(
+                                    "Ambiguous or non-existent local time for end: {}",
+                                    end_naive
+                                )
+                            })?;
+                        (start_fixed, stop_fixed)
+                    } else {
+                        // Final fallback: chrono-english point + 24h
+                        let start = parse_with_reference(timespan, default)?;
+                        let stop = start + chrono::Duration::days(1);
+                        (start, stop)
+                    }
+                }
+            }
         }
     };
 
@@ -573,5 +615,69 @@ mod tests {
         // Wall clock time should be preserved: 03:17 in input = 03:17 in output
         assert_eq!(summer_time.hour(), 3);
         assert_eq!(summer_time.minute(), 17);
+    }
+
+    #[test]
+    fn test_timespan_natural_language_full_periods() {
+        // Reference: Wednesday 2024-03-20 11:45:30+05:00
+        let offset = chrono::FixedOffset::east_opt(5 * 3600).unwrap();
+        let dt = offset.with_ymd_and_hms(2024, 3, 20, 11, 45, 30).unwrap();
+
+        // "today" should be full day: 2024-03-20 00:00:00 .. 2024-03-21 00:00:00
+        let (start, stop) = parse_timespan_with_reference("today", &dt).unwrap();
+        assert_eq!(
+            start,
+            offset.with_ymd_and_hms(2024, 3, 20, 0, 0, 0).unwrap()
+        );
+        assert_eq!(stop, offset.with_ymd_and_hms(2024, 3, 21, 0, 0, 0).unwrap());
+
+        // "yesterday" should be full day: 2024-03-19 00:00:00 .. 2024-03-20 00:00:00
+        let (start, stop) = parse_timespan_with_reference("yesterday", &dt).unwrap();
+        assert_eq!(
+            start,
+            offset.with_ymd_and_hms(2024, 3, 19, 0, 0, 0).unwrap()
+        );
+        assert_eq!(stop, offset.with_ymd_and_hms(2024, 3, 20, 0, 0, 0).unwrap());
+
+        // "tomorrow" should be full day: 2024-03-21 00:00:00 .. 2024-03-22 00:00:00
+        let (start, stop) = parse_timespan_with_reference("tomorrow", &dt).unwrap();
+        assert_eq!(
+            start,
+            offset.with_ymd_and_hms(2024, 3, 21, 0, 0, 0).unwrap()
+        );
+        assert_eq!(stop, offset.with_ymd_and_hms(2024, 3, 22, 0, 0, 0).unwrap());
+
+        // "last friday" should be full day: 2024-03-15
+        let (start, stop) = parse_timespan_with_reference("last friday", &dt).unwrap();
+        assert_eq!(
+            start,
+            offset.with_ymd_and_hms(2024, 3, 15, 0, 0, 0).unwrap()
+        );
+        assert_eq!(stop, offset.with_ymd_and_hms(2024, 3, 16, 0, 0, 0).unwrap());
+    }
+
+    #[test]
+    fn test_timespan_natural_language_periods() {
+        // Reference: Wednesday 2024-03-20 11:45:30+05:00
+        let offset = chrono::FixedOffset::east_opt(5 * 3600).unwrap();
+        let dt = offset.with_ymd_and_hms(2024, 3, 20, 11, 45, 30).unwrap();
+
+        // "this week" = Monday 2024-03-18 00:00 .. Monday 2024-03-25 00:00
+        let (start, stop) = parse_timespan_with_reference("this week", &dt).unwrap();
+        assert_eq!(
+            start,
+            offset.with_ymd_and_hms(2024, 3, 18, 0, 0, 0).unwrap()
+        );
+        assert_eq!(stop, offset.with_ymd_and_hms(2024, 3, 25, 0, 0, 0).unwrap());
+
+        // "this month" = 2024-03-01 00:00 .. 2024-04-01 00:00
+        let (start, stop) = parse_timespan_with_reference("this month", &dt).unwrap();
+        assert_eq!(start, offset.with_ymd_and_hms(2024, 3, 1, 0, 0, 0).unwrap());
+        assert_eq!(stop, offset.with_ymd_and_hms(2024, 4, 1, 0, 0, 0).unwrap());
+
+        // "this year" = 2024-01-01 00:00 .. 2025-01-01 00:00
+        let (start, stop) = parse_timespan_with_reference("this year", &dt).unwrap();
+        assert_eq!(start, offset.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap());
+        assert_eq!(stop, offset.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap());
     }
 }
