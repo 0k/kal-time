@@ -9,6 +9,18 @@ repository = "https://github.com/0k/kal-time"
 readme = "README.md"
 keywords = ["time", "datetime", "parsing", "chrono"]
 categories = ["date-and-time", "parsing"]
+exclude = [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "CHANGELOG.rst",
+    "README.org",
+    "autogen.sh",
+    "/bin/",
+    ".gitchangelog.rc",
+    ".gitignore",
+    ".package",
+    ".package.d/",
+]
 
 [dependencies]
 chrono = { version = "0.4.31" }
