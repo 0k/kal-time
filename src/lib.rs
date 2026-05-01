@@ -366,6 +366,38 @@ fn parse_with_reference_internal<Tz: TimeZone + 'static>(
     Err(format!("Could not parse time string: {:?}", timestr))
 }
 
+/// Parse a single time string into a `DateTime<FixedOffset>`, filling
+/// missing fields from `reference`.
+///
+/// The input is matched against an internal format table (ISO 8601
+/// variants, partial dates, time-only, terse forms like `9h`/`30m`,
+/// `@<unix>`, …) and falls back to `chrono-english` for natural-language
+/// expressions (`yesterday`, `next monday`, `2 days ago`, …).
+///
+/// Missing fields are filled from `reference` from coarsest to finest,
+/// stopping at the first explicitly-specified field. So `9h` against
+/// `2024-03-20 11:45:30+05:00` keeps the date and yields
+/// `2024-03-20 09:00:00+05:00`. The output offset comes from any
+/// explicit `%z`/`%:z`/`Z` in the input; otherwise it is derived from
+/// `reference`'s timezone (DST-aware when `reference: DateTime<Local>`,
+/// DST-blind for `DateTime<FixedOffset>`/`DateTime<Utc>`).
+///
+/// # Errors
+///
+/// Returns `Err` if the input matches no known format, or if the
+/// resulting local time is ambiguous / non-existent under DST when the
+/// reference is `DateTime<Local>`.
+///
+/// # Example
+///
+/// ```
+/// use chrono::{TimeZone, Utc};
+/// use kal_time::parse_with_reference;
+///
+/// let reference = Utc.with_ymd_and_hms(2025, 10, 22, 9, 10, 11).unwrap();
+/// let parsed = parse_with_reference("30m", &reference).unwrap();
+/// assert_eq!(parsed.to_rfc3339(), "2025-10-22T09:30:00+00:00");
+/// ```
 pub fn parse_with_reference<Tz: TimeZone + 'static>(
     timestr: &str,
     reference: &DateTime<Tz>,
@@ -373,18 +405,79 @@ pub fn parse_with_reference<Tz: TimeZone + 'static>(
     parse_with_reference_internal(timestr, reference).map(|(dt, _fmt)| dt)
 }
 
+/// Parse a time string against the current local-time reference.
+///
+/// Equivalent to [`parse_with_reference`] using `chrono::Local::now()`
+/// as the reference. The output offset matches the system timezone for
+/// the resolved instant (DST-aware).
+///
+/// # Errors
+///
+/// Same as [`parse_with_reference`].
 pub fn parse(timespan: &str) -> Result<DateTime<FixedOffset>, String> {
     let now = chrono::Local::now();
     parse_with_reference(timespan, &now)
 }
 
+/// Parse a time string against the current UTC reference.
+///
+/// Equivalent to [`parse_with_reference`] using `chrono::Utc::now()`
+/// as the reference. Missing fields and missing offsets default to UTC
+/// (`+00:00`).
+///
+/// # Errors
+///
+/// Same as [`parse_with_reference`].
 pub fn parse_utc(timespan: &str) -> Result<DateTime<FixedOffset>, String> {
     let now = chrono::Utc::now();
     parse_with_reference(timespan, &now)
 }
 
-type Timespan = (DateTime<FixedOffset>, DateTime<FixedOffset>);
+/// Half-open interval `[start, stop)` returned by
+/// [`parse_timespan`] / [`parse_timespan_with_reference`].
+pub type Timespan = (DateTime<FixedOffset>, DateTime<FixedOffset>);
 
+/// Parse a timespan string into a half-open `[start, stop)` interval,
+/// using `default` as the reference for relative inputs.
+///
+/// Each operand resolves to its own natural period derived from the
+/// smallest explicitly-specified field (the *precision rule*):
+///
+/// | Smallest specifier | Period length |
+/// | `%Y`               | 1 calendar year  |
+/// | `%m`               | 1 calendar month |
+/// | `%d`               | 1 day            |
+/// | `%H`               | 1 hour           |
+/// | `%M`               | 1 minute         |
+/// | `%S` / `%s`        | 1 second         |
+///
+/// Calendar tokens (`today`, `yesterday`, `last friday`, `this week`,
+/// …) keep their `two-timer` boundaries; `now` (case-insensitive)
+/// resolves to the reference instant.
+///
+/// Composition (with `..`):
+///
+/// | Input shape | Result                            |
+/// | bare `P`    | `[L(P), R(P))`                    |
+/// | `P..Q`      | `[L(P), L(Q))` — right uses LEFT edge |
+/// | `X..`       | `[L(X), now)`                     |
+///
+/// # Errors
+///
+/// Returns `Err` for: unparseable operands, leading-empty `..X`, bare
+/// `now` / empty input, or any span where `start >= stop`.
+///
+/// # Example
+///
+/// ```
+/// use chrono::{TimeZone, Utc};
+/// use kal_time::parse_timespan_with_reference;
+///
+/// let reference = Utc.with_ymd_and_hms(2025, 10, 22, 9, 10, 11).unwrap();
+/// let (start, stop) = parse_timespan_with_reference("9h..10h", &reference).unwrap();
+/// assert_eq!(start.to_rfc3339(), "2025-10-22T09:00:00+00:00");
+/// assert_eq!(stop.to_rfc3339(), "2025-10-22T10:00:00+00:00");
+/// ```
 pub fn parse_timespan_with_reference<Tz: TimeZone + 'static>(
     timespan: &str,
     default: &DateTime<Tz>,
@@ -453,6 +546,14 @@ pub fn parse_timespan_with_reference<Tz: TimeZone + 'static>(
     Ok((start, stop))
 }
 
+/// Parse a timespan string against the current local-time reference.
+///
+/// Equivalent to [`parse_timespan_with_reference`] using
+/// `chrono::Local::now()` as the reference.
+///
+/// # Errors
+///
+/// Same as [`parse_timespan_with_reference`].
 pub fn parse_timespan(timespan: &str) -> Result<Timespan, String> {
     let now = chrono::Local::now();
     parse_timespan_with_reference(timespan, &now)
