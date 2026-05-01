@@ -299,13 +299,55 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 *** Natural language timespans
 
-When ~parse_timespan~ receives a natural language expression (without
-~..~), it returns calendar-aligned full periods instead of a single
-point offset by 24 hours. This is powered by the ~two-timer~ crate.
+~parse_timespan~ returns half-open ~[start, stop)~ intervals where
+~stop~ is the first instant *not* in the span. Every operand resolves
+to its own natural period; composition with ~..~ then picks edges by
+position.
 
-For example, ~"today"~ returns midnight-to-midnight of the current
-day, ~"this week"~ returns Monday-to-Monday, ~"this month"~ returns
-the 1st-to-1st, etc.
+**** Operand resolution
+
+Each operand resolves to a half-open period ~[L, R)~:
+
+- *Calendar tokens* (~today~, ~yesterday~, ~tomorrow~, ~last friday~,
+  ~this week~, ~this month~, ~this year~, …) — boundaries from the
+  ~two-timer~ crate. ~today~ in a Wednesday reference =
+  ~[Wed 00:00, Thu 00:00)~.
+
+- *Explicit / terse formats* — ~L~ is the parsed instant with
+  unspecified fields filled to start-of-unit; ~R~ is ~L~ plus *one
+  unit of the smallest explicitly-specified field*. The unit comes
+  from the rightmost ~%X~ specifier of the matched format:
+
+  | Smallest specifier | Unit added to ~L~ to get ~R~ |
+  |--------------------+------------------------------|
+  | ~%Y~               | 1 calendar year              |
+  | ~%m~               | 1 calendar month             |
+  | ~%d~               | 1 day                        |
+  | ~%H~               | 1 hour                       |
+  | ~%M~               | 1 minute                     |
+  | ~%S~ / ~%s~        | 1 second                     |
+
+  So ~9h~ as a timespan is ~[09:00, 10:00)~ (1 hour); ~14:30~ is
+  ~[14:30, 14:31)~ (1 minute); ~2024~ is the whole year; ~2024-10~
+  is the whole month.
+
+- *~now~* (case-insensitive) — the reference instant, treated as a
+  zero-width period. Recognized only as a ~..~ operand or as the
+  implicit right side of ~X..~.
+
+**** Composition rule
+
+| Input shape   | Result                                      |
+|---------------+---------------------------------------------|
+| bare ~P~      | ~[L(P), R(P))~                              |
+| ~P..Q~        | ~[L(P), L(Q))~ — *right uses LEFT edge*     |
+| ~X..~         | ~[L(X), now)~                               |
+| ~..X~         | rejected                                    |
+| bare ~now~    | rejected                                    |
+
+A timespan with ~start >= stop~ is rejected.
+
+**** Examples
 
 All examples use reference ~2024-03-20T11:45:30+05:00~ (a Wednesday):
 
@@ -336,9 +378,64 @@ $ kt-parse timespan "this year" 2024-03-20T11:45:30+05:00
 1735671600 2025-01-01 00:00:00 +05:00
 #+end_src
 
+Bare instants follow the precision rule (reference ~2026-05-01T15:00:00+02:00~):
+
+#+begin_src docshtest
+$ kt-parse timespan 9h 2026-05-01T15:00:00+02:00
+1777618800 2026-05-01 09:00:00 +02:00
+1777622400 2026-05-01 10:00:00 +02:00
+$ kt-parse timespan 14:30 2026-05-01T15:00:00+02:00
+1777638600 2026-05-01 14:30:00 +02:00
+1777638660 2026-05-01 14:31:00 +02:00
+$ kt-parse timespan 2024-10 2026-05-01T15:00:00+02:00
+1727733600 2024-10-01 00:00:00 +02:00
+1730412000 2024-11-01 00:00:00 +02:00
+$ kt-parse timespan 2024 2026-05-01T15:00:00+02:00
+1704060000 2024-01-01 00:00:00 +02:00
+1735682400 2025-01-01 00:00:00 +02:00
+#+end_src
+
+Open-ended ranges and ~now~:
+
+#+begin_src docshtest
+$ kt-parse timespan today.. 2026-05-01T15:00:00+02:00
+1777586400 2026-05-01 00:00:00 +02:00
+1777640400 2026-05-01 15:00:00 +02:00
+$ kt-parse timespan yesterday..now 2026-05-01T15:00:00+02:00
+1777500000 2026-04-30 00:00:00 +02:00
+1777640400 2026-05-01 15:00:00 +02:00
+$ kt-parse timespan yesterday..tomorrow 2026-05-01T15:00:00+02:00
+1777500000 2026-04-30 00:00:00 +02:00
+1777672800 2026-05-02 00:00:00 +02:00
+#+end_src
+
+Rejected forms — each emits a clear error:
+
+#+begin_src docshtest
+$ kt-parse timespan ..today 2026-05-01T15:00:00+02:00
+Failed to parse timespan: Invalid timespan "..today": leading-empty (`..X`) is not supported
+#+end_src
+
+#+begin_src docshtest
+$ kt-parse timespan now 2026-05-01T15:00:00+02:00
+Failed to parse timespan: Invalid timespan "now": bare `now` / empty input is not a period
+#+end_src
+
+#+begin_src docshtest
+$ kt-parse timespan today..yesterday 2026-05-01T15:00:00+02:00
+Failed to parse timespan: Invalid timespan "today..yesterday": start (2026-05-01 00:00:00 +0200) is not strictly before stop (2026-04-30 00:00:00 +0200)
+#+end_src
+
 Note: ~parse~ (single time point) is unaffected — ~"today"~ in that
 context still returns the reference time ± 1 day, preserving the
 clock component.
+
+**** Breaking change (vs. previous behavior)
+
+Bare-instant inputs to ~parse_timespan~ used to return ~[t, t + 24h)~
+unconditionally. They now follow the precision rule: ~9h~ is 1 hour,
+~14:30~ is 1 minute, ~2024-10~ is 1 month, etc. The single-instant
+API (~parse~) is unchanged.
 
 * Command-line Utility
 

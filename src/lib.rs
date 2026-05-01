@@ -1,5 +1,5 @@
 use chrono::offset::Offset;
-use chrono::{DateTime, FixedOffset, NaiveDateTime, TimeZone};
+use chrono::{DateTime, Duration, FixedOffset, Months, TimeZone};
 use chrono_english::{parse_date_string, Dialect};
 use lazy_static::lazy_static;
 use two_timer::{parse as two_timer_parse, Config as TwoTimerConfig};
@@ -38,7 +38,255 @@ lazy_static! {
         "%Mm",
         "%M",
         "@%s",
+        // Bare year-month / year placed AT THE END so they only catch
+        // inputs that no more-specific format accepted. `01-12` matches
+        // `%m-%d` first; `2024-10-01` matches `%Y-%m-%d` first.
+        "%Y-%m",
+        "%Y",
     ];
+}
+
+/// The natural period attached to a parsed instant, derived from the
+/// smallest explicitly-specified field of the matched format string.
+///
+/// Used by `parse_timespan_with_reference` to compute `R = L + 1 unit`
+/// for half-open `[L, R)` intervals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PeriodUnit {
+    Year,
+    Month,
+    Day,
+    Hour,
+    Minute,
+    Second,
+}
+
+/// Read the rightmost time-field specifier of a chrono format string and
+/// return the corresponding `PeriodUnit`. Skips offset specifiers
+/// (`%:z`, `%#z`) which carry no precision.
+///
+/// **Panics** if `fmt` contains no recognized time-field specifier. This
+/// is a programmer-error invariant: every entry in `TIMEPARSER_FORMATS`
+/// (and every suffix derived from it via `generate_suffix_formats`)
+/// contains at least one such specifier.
+pub(crate) fn unit_from_format(fmt: &str) -> PeriodUnit {
+    let bytes = fmt.as_bytes();
+    let mut i = 0;
+    let mut last_unit: Option<PeriodUnit> = None;
+    while i < bytes.len() {
+        if bytes[i] != b'%' {
+            i += 1;
+            continue;
+        }
+        if i + 1 >= bytes.len() {
+            break;
+        }
+        let spec = bytes[i + 1];
+        // Skip offset specifiers: %:z and %#z (3 bytes each, no precision)
+        if (spec == b':' || spec == b'#') && i + 2 < bytes.len() && bytes[i + 2] == b'z' {
+            i += 3;
+            continue;
+        }
+        match spec {
+            b'Y' => last_unit = Some(PeriodUnit::Year),
+            b'm' => last_unit = Some(PeriodUnit::Month),
+            b'd' => last_unit = Some(PeriodUnit::Day),
+            b'H' => last_unit = Some(PeriodUnit::Hour),
+            b'M' => last_unit = Some(PeriodUnit::Minute),
+            b'S' | b's' => last_unit = Some(PeriodUnit::Second),
+            _ => {} // unknown/other specifier; ignore
+        }
+        i += 2;
+    }
+    last_unit.unwrap_or_else(|| panic!("format string {:?} contains no time-field specifier", fmt))
+}
+
+/// Compute `R = L + one unit` for a half-open period.
+///
+/// For `Year`/`Month`, calendar arithmetic is used (`Months::new`).
+/// When the reference is `DateTime<Local>`, the resulting `R`'s offset
+/// is recomputed via the system timezone for the target date, so that
+/// e.g. `2024-03` under Paris correctly produces a stop with the summer
+/// offset (DST-aware). For `FixedOffset`/`Utc` references, the start's
+/// offset is preserved (DST-blind).
+///
+/// For `Day`/`Hour`/`Minute`/`Second`, plain `chrono::Duration`
+/// arithmetic is used (intentionally DST-blind — `[09:00, 10:00)` is
+/// always 3600 wall-clock-aware seconds in the captured offset).
+///
+/// Returns `Err` if calendar arithmetic overflows or if the resulting
+/// boundary lands inside a DST gap that cannot be resolved by the
+/// captured offset (both unreachable for typical period-1 boundaries
+/// from the format-table parsers, but signalled cleanly to the caller
+/// instead of panicking).
+fn add_period_unit<Tz: TimeZone + 'static>(
+    unit: PeriodUnit,
+    l: DateTime<FixedOffset>,
+    _reference: &DateTime<Tz>,
+) -> Result<DateTime<FixedOffset>, String> {
+    match unit {
+        PeriodUnit::Year | PeriodUnit::Month => {
+            let months = if matches!(unit, PeriodUnit::Year) {
+                12
+            } else {
+                1
+            };
+            let stop_naive = l
+                .naive_local()
+                .checked_add_months(Months::new(months))
+                .ok_or_else(|| {
+                    format!(
+                        "Calendar arithmetic overflow when adding {} month(s) to {}",
+                        months,
+                        l.naive_local()
+                    )
+                })?;
+            let ref_is_local =
+                std::any::TypeId::of::<Tz>() == std::any::TypeId::of::<chrono::Local>();
+            if ref_is_local {
+                match chrono::Local.from_local_datetime(&stop_naive) {
+                    chrono::LocalResult::Single(dt) => Ok(dt.with_timezone(&dt.offset().fix())),
+                    // Period boundary inside DST gap/fold (not realistic
+                    // for month-1 boundaries; defensive fallback).
+                    chrono::LocalResult::Ambiguous(a, _) => Ok(a.with_timezone(&a.offset().fix())),
+                    chrono::LocalResult::None => l
+                        .offset()
+                        .from_local_datetime(&stop_naive)
+                        .single()
+                        .ok_or_else(|| {
+                            format!("Non-existent local time at period boundary: {}", stop_naive)
+                        }),
+                }
+            } else {
+                l.offset()
+                    .from_local_datetime(&stop_naive)
+                    .single()
+                    .ok_or_else(|| {
+                        format!("Non-existent local time at period boundary: {}", stop_naive)
+                    })
+            }
+        }
+        PeriodUnit::Day => Ok(l + Duration::days(1)),
+        PeriodUnit::Hour => Ok(l + Duration::hours(1)),
+        PeriodUnit::Minute => Ok(l + Duration::minutes(1)),
+        PeriodUnit::Second => Ok(l + Duration::seconds(1)),
+    }
+}
+
+/// Internal representation of a single `..`-operand or bare-input piece.
+enum Operand {
+    /// Empty string (e.g. the right half of `today..`).
+    Empty,
+    /// The literal `now` token (case-insensitive).
+    Now,
+    /// A parsed period `[L, R)`.
+    Period(DateTime<FixedOffset>, DateTime<FixedOffset>),
+}
+
+/// Resolve a single timespan operand to its half-open natural period.
+///
+/// Two references are accepted because the `..` branch needs different
+/// anchoring for different parser stages:
+///
+///   - `format_ref` is used for the format-table parsers (suffix
+///     formats AND `TIMEPARSER_FORMATS`). For the right operand of
+///     `P..Q`, this is the resolved start instant — so terse inputs
+///     like `30` in `10:15..30` inherit start's fields.
+///   - `nlp_ref` is used for `two_timer` and `chrono-english`. These
+///     interpret natural-language tokens like `today` relative to the
+///     **user's current moment**, not relative to start; otherwise
+///     `2026-04-30..today` would resolve `today` against
+///     `2026-04-30` and mean "the day of start" (a useless tautology).
+///
+/// For bare inputs (no `..`), the caller passes the same reference for
+/// both.
+///
+/// Resolution order (first match wins):
+///   1. Empty string → `Operand::Empty` (sentinel).
+///   2. Case-insensitive `now` → `Operand::Now` (sentinel).
+///   3. `extra_formats` (suffix formats; uses `format_ref`).
+///   4. `TIMEPARSER_FORMATS` (uses `format_ref`).
+///   5. `two_timer` (uses `nlp_ref`).
+///   6. `chrono-english` (uses `nlp_ref`).
+///
+/// Returns `(Operand, Option<&'static str>)` where the second element
+/// is the matched static format string when step 4 succeeded.
+fn resolve_operand<Tz: TimeZone + 'static, Tn: TimeZone + 'static>(
+    s: &str,
+    format_ref: &DateTime<Tz>,
+    nlp_ref: &DateTime<Tn>,
+    extra_formats: &[&str],
+) -> Result<(Operand, Option<&'static str>), String> {
+    if s.is_empty() {
+        return Ok((Operand::Empty, None));
+    }
+    if s.eq_ignore_ascii_case("now") {
+        return Ok((Operand::Now, None));
+    }
+
+    // 1. Suffix formats from the left operand (tried FIRST).
+    for fmt in extra_formats.iter() {
+        match parse::parse_partial(s, fmt, format_ref, true) {
+            Ok(dt) => {
+                let unit = unit_from_format(fmt);
+                let r = add_period_unit(unit, dt, format_ref)?;
+                return Ok((Operand::Period(dt, r), None));
+            }
+            Err(e) if e.contains("Ambiguous") || e.contains("Non-existent") => {
+                return Err(e);
+            }
+            Err(_) => continue,
+        }
+    }
+
+    // 2. Static format table.
+    for fmt in TIMEPARSER_FORMATS.iter() {
+        match parse::parse_partial(s, fmt, format_ref, true) {
+            Ok(dt) => {
+                let unit = unit_from_format(fmt);
+                let r = add_period_unit(unit, dt, format_ref)?;
+                return Ok((Operand::Period(dt, r), Some(*fmt)));
+            }
+            Err(e) if e.contains("Ambiguous") || e.contains("Non-existent") => {
+                return Err(e);
+            }
+            Err(_) => continue,
+        }
+    }
+
+    // 3. two-timer (calendar-aligned NLP periods, anchored at nlp_ref).
+    let nlp_offset = nlp_ref.offset().fix();
+    let naive_now = nlp_ref.with_timezone(&nlp_offset).naive_local();
+    let config = TwoTimerConfig::new().now(naive_now);
+    if let Ok((start_naive, end_naive, _)) = two_timer_parse(s, Some(config)) {
+        let l = nlp_offset
+            .from_local_datetime(&start_naive)
+            .single()
+            .ok_or_else(|| {
+                format!(
+                    "Ambiguous or non-existent local time for start: {}",
+                    start_naive
+                )
+            })?;
+        let r = nlp_offset
+            .from_local_datetime(&end_naive)
+            .single()
+            .ok_or_else(|| {
+                format!(
+                    "Ambiguous or non-existent local time for end: {}",
+                    end_naive
+                )
+            })?;
+        return Ok((Operand::Period(l, r), None));
+    }
+
+    // 4. chrono-english (legacy single-instant NLP, anchored at nlp_ref).
+    let nlp_fixed: DateTime<FixedOffset> = nlp_ref.with_timezone(&nlp_offset);
+    if let Ok(dt) = parse_date_string(s, nlp_fixed, Dialect::Uk) {
+        return Ok((Operand::Period(dt, dt + Duration::seconds(1)), None));
+    }
+
+    Err(format!("Could not parse timespan operand: {:?}", s))
 }
 
 /// Generate suffix formats by progressively trimming the leftmost `%X` specifier
@@ -82,20 +330,6 @@ fn trim_leftmost_specifier(fmt: &str) -> Option<&str> {
     let suffix = &after_spec[next_pct..];
 
     Some(suffix)
-}
-
-fn parse_with_formats<'a, Tz: TimeZone + 'static>(
-    timestr: &str,
-    reference: &DateTime<Tz>,
-    formats: &[&'a str],
-) -> Option<(DateTime<FixedOffset>, &'a str)> {
-    for format in formats {
-        log::trace!("Trying to parse {:?} with format {:?}", timestr, format);
-        if let Ok(dt) = parse::parse_partial(timestr, format, reference, true) {
-            return Some((dt, format));
-        }
-    }
-    None
 }
 
 fn parse_with_reference_internal<Tz: TimeZone + 'static>(
@@ -155,78 +389,64 @@ pub fn parse_timespan_with_reference<Tz: TimeZone + 'static>(
     timespan: &str,
     default: &DateTime<Tz>,
 ) -> Result<Timespan, String> {
+    let ref_instant: DateTime<FixedOffset> = default.with_timezone(&default.offset().fix());
+
     let (start, stop) = match timespan.split_once("..") {
-        Some((start_str, stop_str)) => {
-            let (first, first_fmt) = parse_with_reference_internal(start_str, default)?;
-
-            // Try suffix formats first for the end part
-            let suffix_formats = generate_suffix_formats(first_fmt);
-            let suffix_refs: Vec<&str> = suffix_formats.iter().map(|s| s.as_str()).collect();
-
-            let second = if let Some((dt, _)) = parse_with_formats(stop_str, &first, &suffix_refs) {
-                dt
-            } else {
-                // Fall back to standard formats
-                parse_with_reference(stop_str, &first)?
+        Some((left_str, right_str)) => {
+            // Left operand: use `default` for both format-table and NLP
+            // (no field-inheritance possible — it's the leftmost piece).
+            let (left, left_matched_fmt) = resolve_operand(left_str, default, default, &[])?;
+            let start = match left {
+                Operand::Empty => {
+                    return Err(format!(
+                        "Invalid timespan {:?}: leading-empty (`..X`) is not supported",
+                        timespan
+                    ));
+                }
+                Operand::Now => ref_instant,
+                Operand::Period(l, _) => l,
             };
 
-            (first, second)
+            // Right operand: format-table parsers anchor at `start` so
+            // terse formats like `30` in `10:15..30` inherit start's
+            // hour; NLP parsers anchor at `default` so `today` means
+            // "today relative to the user's now", not "relative to
+            // start". Suffix formats derived from the left's matched
+            // format are tried FIRST inside resolve_operand.
+            let suffix_owned: Vec<String> = match left_matched_fmt {
+                Some(fmt) => generate_suffix_formats(fmt),
+                None => Vec::new(),
+            };
+            let suffix_refs: Vec<&str> = suffix_owned.iter().map(|s| s.as_str()).collect();
+            let (right, _) = resolve_operand(right_str, &start, default, &suffix_refs)?;
+            let stop = match right {
+                Operand::Empty => ref_instant, // X.. shorthand for X..now
+                Operand::Now => ref_instant,
+                Operand::Period(l, _) => l, // RIGHT uses LEFT edge
+            };
+
+            (start, stop)
         }
         None => {
-            // Try our own format parser first (fast path for ISO dates,
-            // terse formats like "9h", timestamps, etc.).
-            match parse_with_reference_internal(timespan, default) {
-                Ok((dt, fmt)) if fmt != "chrono-english" => {
-                    // Format-based match — single point + 24h
-                    let stop = dt + chrono::Duration::days(1);
-                    (dt, stop)
+            let (op, _) = resolve_operand(timespan, default, default, &[])?;
+            match op {
+                Operand::Empty | Operand::Now => {
+                    return Err(format!(
+                        "Invalid timespan {:?}: bare `now` / empty input is not a period",
+                        timespan
+                    ));
                 }
-                Ok(_) | Err(_) => {
-                    // Natural language (chrono-english matched) or nothing
-                    // matched at all — try two-timer for calendar-aligned ranges.
-                    let ref_offset = default.offset().fix();
-                    let naive_now: NaiveDateTime = default.with_timezone(&ref_offset).naive_local();
-                    let config = TwoTimerConfig::new().now(naive_now);
-
-                    if let Ok((start_naive, end_naive, _)) = two_timer_parse(timespan, Some(config))
-                    {
-                        let start_fixed = ref_offset
-                            .from_local_datetime(&start_naive)
-                            .single()
-                            .ok_or_else(|| {
-                                format!(
-                                    "Ambiguous or non-existent local time for start: {}",
-                                    start_naive
-                                )
-                            })?;
-                        let stop_fixed = ref_offset
-                            .from_local_datetime(&end_naive)
-                            .single()
-                            .ok_or_else(|| {
-                                format!(
-                                    "Ambiguous or non-existent local time for end: {}",
-                                    end_naive
-                                )
-                            })?;
-                        (start_fixed, stop_fixed)
-                    } else {
-                        // Final fallback: chrono-english point + 24h
-                        let start = parse_with_reference(timespan, default)?;
-                        let stop = start + chrono::Duration::days(1);
-                        (start, stop)
-                    }
-                }
+                Operand::Period(l, r) => (l, r),
             }
         }
     };
 
-    // Validate that start <= stop (reject reverse timespans)
-    if start > stop {
+    if start >= stop {
         return Err(format!(
-            "Invalid timespan '{}': end time ({}) is before start time ({})",
+            "Invalid timespan {:?}: start ({}) is not strictly before stop ({})",
             timespan,
-            stop.format("%Y-%m-%d %H:%M:%S %z"),
-            start.format("%Y-%m-%d %H:%M:%S %z")
+            start.format("%Y-%m-%d %H:%M:%S %z"),
+            stop.format("%Y-%m-%d %H:%M:%S %z")
         ));
     }
 
@@ -679,5 +899,412 @@ mod tests {
         let (start, stop) = parse_timespan_with_reference("this year", &dt).unwrap();
         assert_eq!(start, offset.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap());
         assert_eq!(stop, offset.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap());
+    }
+}
+
+/// Tests for the strengthened timespan semantics (precision-period rule,
+/// `now` token, `X..` open-ended shorthand, position-based L/R rule).
+/// Locked spec lives at `.sisyphus/plans/strengthen-timespan.md` §1.
+#[cfg(test)]
+mod timespan_strengthening {
+    use super::*;
+    use chrono::FixedOffset;
+
+    /// Canonical reference: Friday 2026-05-01 15:00 +02:00.
+    fn friday_ref() -> DateTime<FixedOffset> {
+        FixedOffset::east_opt(2 * 3600)
+            .unwrap()
+            .with_ymd_and_hms(2026, 5, 1, 15, 0, 0)
+            .unwrap()
+    }
+
+    /// Construct `[start, stop)` from year/month/day/hour/minute/second
+    /// pairs at the given offset (seconds east of UTC).
+    fn span(
+        offset_secs: i32,
+        s: (i32, u32, u32, u32, u32, u32),
+        e: (i32, u32, u32, u32, u32, u32),
+    ) -> (DateTime<FixedOffset>, DateTime<FixedOffset>) {
+        let off = FixedOffset::east_opt(offset_secs).unwrap();
+        (
+            off.with_ymd_and_hms(s.0, s.1, s.2, s.3, s.4, s.5).unwrap(),
+            off.with_ymd_and_hms(e.0, e.1, e.2, e.3, e.4, e.5).unwrap(),
+        )
+    }
+
+    fn ts(input: &str) -> (DateTime<FixedOffset>, DateTime<FixedOffset>) {
+        parse_timespan_with_reference(input, &friday_ref())
+            .unwrap_or_else(|e| panic!("parse {:?} failed: {}", input, e))
+    }
+
+    fn ts_err(input: &str) -> String {
+        parse_timespan_with_reference(input, &friday_ref())
+            .err()
+            .unwrap_or_else(|| panic!("parse {:?} should have errored", input))
+    }
+
+    // ===== Bare-period: precision rule =====
+
+    #[test]
+    fn test_bare_year() {
+        // friday_ref offset is +02:00 (7200s); bare instants inherit it.
+        assert_eq!(
+            ts("2024"),
+            span(7200, (2024, 1, 1, 0, 0, 0), (2025, 1, 1, 0, 0, 0))
+        );
+    }
+
+    #[test]
+    fn test_bare_year_month() {
+        assert_eq!(
+            ts("2024-10"),
+            span(7200, (2024, 10, 1, 0, 0, 0), (2024, 11, 1, 0, 0, 0))
+        );
+    }
+
+    #[test]
+    fn test_bare_full_date() {
+        assert_eq!(
+            ts("2024-10-01"),
+            span(7200, (2024, 10, 1, 0, 0, 0), (2024, 10, 2, 0, 0, 0))
+        );
+    }
+
+    #[test]
+    fn test_bare_hour_terse() {
+        assert_eq!(
+            ts("9h"),
+            span(7200, (2026, 5, 1, 9, 0, 0), (2026, 5, 1, 10, 0, 0))
+        );
+    }
+
+    #[test]
+    fn test_bare_minute_colon() {
+        assert_eq!(
+            ts("14:30"),
+            span(7200, (2026, 5, 1, 14, 30, 0), (2026, 5, 1, 14, 31, 0))
+        );
+    }
+
+    #[test]
+    fn test_bare_second_colon() {
+        assert_eq!(
+            ts("14:30:45"),
+            span(7200, (2026, 5, 1, 14, 30, 45), (2026, 5, 1, 14, 30, 46))
+        );
+    }
+
+    #[test]
+    fn test_bare_minute_terse() {
+        // "30m" = minute=30, hour inherited from ref (15). Smallest specifier %M → 1 minute.
+        assert_eq!(
+            ts("30m"),
+            span(7200, (2026, 5, 1, 15, 30, 0), (2026, 5, 1, 15, 31, 0))
+        );
+    }
+
+    #[test]
+    fn test_bare_unix_timestamp() {
+        // @1736692200 = 2025-01-12 14:30:00 UTC. Always UTC, ignored ref offset.
+        assert_eq!(
+            ts("@1736692200"),
+            span(0, (2025, 1, 12, 14, 30, 0), (2025, 1, 12, 14, 30, 1))
+        );
+    }
+
+    // ===== Open-ended right =====
+
+    #[test]
+    fn test_today_open_right() {
+        // today.. → [today 00:00, ref instant)
+        assert_eq!(
+            ts("today.."),
+            span(7200, (2026, 5, 1, 0, 0, 0), (2026, 5, 1, 15, 0, 0))
+        );
+    }
+
+    #[test]
+    fn test_yesterday_open_right() {
+        assert_eq!(
+            ts("yesterday.."),
+            span(7200, (2026, 4, 30, 0, 0, 0), (2026, 5, 1, 15, 0, 0))
+        );
+    }
+
+    // ===== Two-operand =====
+
+    #[test]
+    fn test_yesterday_to_today() {
+        // right=LEFT(today): stop is today's left edge = 2026-05-01 00:00
+        assert_eq!(
+            ts("yesterday..today"),
+            span(7200, (2026, 4, 30, 0, 0, 0), (2026, 5, 1, 0, 0, 0))
+        );
+    }
+
+    #[test]
+    fn test_explicit_date_to_now() {
+        assert_eq!(
+            ts("2026-04-30..now"),
+            span(7200, (2026, 4, 30, 0, 0, 0), (2026, 5, 1, 15, 0, 0))
+        );
+    }
+
+    #[test]
+    fn test_yesterday_to_now() {
+        assert_eq!(
+            ts("yesterday..now"),
+            span(7200, (2026, 4, 30, 0, 0, 0), (2026, 5, 1, 15, 0, 0))
+        );
+    }
+
+    #[test]
+    fn test_explicit_date_to_calendar_period() {
+        // right=LEFT(today): stop is today's left edge.
+        assert_eq!(
+            ts("2026-04-30..today"),
+            span(7200, (2026, 4, 30, 0, 0, 0), (2026, 5, 1, 0, 0, 0))
+        );
+    }
+
+    #[test]
+    fn test_yesterday_to_tomorrow() {
+        // right=LEFT(tomorrow) = 2026-05-02 00:00 → covers two days.
+        assert_eq!(
+            ts("yesterday..tomorrow"),
+            span(7200, (2026, 4, 30, 0, 0, 0), (2026, 5, 2, 0, 0, 0))
+        );
+    }
+
+    // ===== Calendar-period boundary tests (own references, separate TZ logic) =====
+
+    fn tzset_refresh() {
+        unsafe extern "C" {
+            fn tzset();
+        }
+        unsafe {
+            tzset();
+        }
+    }
+
+    #[test]
+    fn test_bare_month_no_dst() {
+        // Bare "2024-01" under TZ=Europe/Paris with Local reference.
+        // No DST transition in window (Jan 1..Feb 1 are both +01:00).
+        unsafe {
+            std::env::set_var("TZ", "Europe/Paris");
+        }
+        tzset_refresh();
+        let reference = chrono::Local
+            .with_ymd_and_hms(2024, 6, 15, 12, 0, 0)
+            .unwrap();
+        let (start, stop) = parse_timespan_with_reference("2024-01", &reference).unwrap();
+        let off = FixedOffset::east_opt(3600).unwrap();
+        assert_eq!(start, off.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap());
+        assert_eq!(stop, off.with_ymd_and_hms(2024, 2, 1, 0, 0, 0).unwrap());
+    }
+
+    #[test]
+    fn test_bare_month_spans_dst() {
+        // Bare "2024-03" under TZ=Europe/Paris with Local reference.
+        // March 31 2024 is spring-forward; stop must pick up +02:00.
+        unsafe {
+            std::env::set_var("TZ", "Europe/Paris");
+        }
+        tzset_refresh();
+        let reference = chrono::Local
+            .with_ymd_and_hms(2024, 6, 15, 12, 0, 0)
+            .unwrap();
+        let (start, stop) = parse_timespan_with_reference("2024-03", &reference).unwrap();
+        let off_winter = FixedOffset::east_opt(3600).unwrap();
+        let off_summer = FixedOffset::east_opt(2 * 3600).unwrap();
+        assert_eq!(
+            start,
+            off_winter.with_ymd_and_hms(2024, 3, 1, 0, 0, 0).unwrap()
+        );
+        assert_eq!(
+            stop,
+            off_summer.with_ymd_and_hms(2024, 4, 1, 0, 0, 0).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_bare_month_fixed_offset_ref() {
+        // Bare "2024-03" with FixedOffset(+01:00) reference.
+        // DST-blind path: stop preserves +01:00.
+        let off = FixedOffset::east_opt(3600).unwrap();
+        let reference = off.with_ymd_and_hms(2024, 6, 15, 12, 0, 0).unwrap();
+        let (start, stop) = parse_timespan_with_reference("2024-03", &reference).unwrap();
+        assert_eq!(start, off.with_ymd_and_hms(2024, 3, 1, 0, 0, 0).unwrap());
+        assert_eq!(stop, off.with_ymd_and_hms(2024, 4, 1, 0, 0, 0).unwrap());
+    }
+
+    // ===== Validation / errors =====
+
+    #[test]
+    fn test_reverse_span_rejected() {
+        let err = ts_err("today..yesterday");
+        assert!(
+            err.contains("not strictly before") || err.contains("Invalid"),
+            "expected reverse-span error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_zero_width_explicit_rejected() {
+        let err = ts_err("2026-05-01..2026-05-01");
+        assert!(
+            err.contains("not strictly before") || err.contains("Invalid"),
+            "expected zero-width error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_leading_empty_rejected() {
+        let err = ts_err("..today");
+        assert!(
+            err.contains("leading-empty") || err.contains("..X"),
+            "expected leading-empty error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_bare_now_rejected() {
+        let err = ts_err("now");
+        assert!(
+            err.contains("not a period") || err.contains("bare"),
+            "expected bare-now error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_now_token_case_insensitive() {
+        // Yesterday..NOW = same as yesterday..now
+        assert_eq!(
+            ts("Yesterday..NOW"),
+            span(7200, (2026, 4, 30, 0, 0, 0), (2026, 5, 1, 15, 0, 0))
+        );
+    }
+
+    // ===== unit_from_format derivation tests =====
+
+    #[test]
+    fn test_unit_from_format_derivations() {
+        use super::{unit_from_format, PeriodUnit};
+        assert_eq!(unit_from_format("%Y"), PeriodUnit::Year);
+        assert_eq!(unit_from_format("%Y-%m"), PeriodUnit::Month);
+        assert_eq!(unit_from_format("%Y-%m-%d"), PeriodUnit::Day);
+        assert_eq!(unit_from_format("%Y-%m-%d %H:%M:%S"), PeriodUnit::Second);
+        // Skips offset specifiers %:z and %#z
+        assert_eq!(unit_from_format("%Y-%m-%dT%H:%M%:z"), PeriodUnit::Minute);
+        assert_eq!(unit_from_format("%Y-%m-%dT%H:%M:%S%#z"), PeriodUnit::Second);
+        assert_eq!(unit_from_format("%Hh"), PeriodUnit::Hour);
+        // Runtime suffix formats
+        assert_eq!(unit_from_format("%M:%S"), PeriodUnit::Second);
+        assert_eq!(unit_from_format("%S"), PeriodUnit::Second);
+        // Unix timestamp
+        assert_eq!(unit_from_format("@%s"), PeriodUnit::Second);
+    }
+
+    // ===== trim_leftmost_specifier tests =====
+
+    #[test]
+    fn test_trim_leftmost_specifier_basic() {
+        use super::trim_leftmost_specifier;
+        // Drops "%Y-" → "%m-%d %H:%M:%S"
+        assert_eq!(
+            trim_leftmost_specifier("%Y-%m-%d %H:%M:%S"),
+            Some("%m-%d %H:%M:%S")
+        );
+        // Drops "%m-" → "%d %H:%M:%S"
+        assert_eq!(
+            trim_leftmost_specifier("%m-%d %H:%M:%S"),
+            Some("%d %H:%M:%S")
+        );
+        // Drops "%d " → "%H:%M:%S"
+        assert_eq!(trim_leftmost_specifier("%d %H:%M:%S"), Some("%H:%M:%S"));
+        // Drops "%H:" → "%M:%S"
+        assert_eq!(trim_leftmost_specifier("%H:%M:%S"), Some("%M:%S"));
+        // Drops "%M:" → "%S"
+        assert_eq!(trim_leftmost_specifier("%M:%S"), Some("%S"));
+        // No more separator after spec → empty suffix
+        assert_eq!(trim_leftmost_specifier("%S"), Some(""));
+    }
+
+    #[test]
+    fn test_trim_leftmost_specifier_terse_separators() {
+        use super::trim_leftmost_specifier;
+        // 'h' separator after %H
+        assert_eq!(trim_leftmost_specifier("%Hh%M"), Some("%M"));
+        // 'h' suffix-only (no further specifier)
+        assert_eq!(trim_leftmost_specifier("%Hh"), Some(""));
+        // '/' separator
+        assert_eq!(trim_leftmost_specifier("%m/%d"), Some("%d"));
+        // 'T' (ISO) separator between date and time
+        assert_eq!(
+            trim_leftmost_specifier("%Y-%m-%dT%H:%M:%S"),
+            Some("%m-%dT%H:%M:%S")
+        );
+    }
+
+    #[test]
+    fn test_trim_leftmost_specifier_no_specifier() {
+        use super::trim_leftmost_specifier;
+        // No '%' at all
+        assert_eq!(trim_leftmost_specifier(""), None);
+        assert_eq!(trim_leftmost_specifier("plain text"), None);
+    }
+
+    // ===== generate_suffix_formats tests =====
+
+    #[test]
+    fn test_generate_suffix_formats_full_iso() {
+        use super::generate_suffix_formats;
+        assert_eq!(
+            generate_suffix_formats("%Y-%m-%d %H:%M:%S"),
+            vec![
+                "%Y-%m-%d %H:%M:%S",
+                "%m-%d %H:%M:%S",
+                "%d %H:%M:%S",
+                "%H:%M:%S",
+                "%M:%S",
+                "%S",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_generate_suffix_formats_terse() {
+        use super::generate_suffix_formats;
+        // %Hh%M → %M (only one suffix; trimming %H gives "h%M" → after
+        // skipping 'h' separator we land on "%M")
+        assert_eq!(generate_suffix_formats("%Hh%M"), vec!["%Hh%M", "%M"]);
+    }
+
+    #[test]
+    fn test_generate_suffix_formats_single_specifier() {
+        use super::generate_suffix_formats;
+        // Single specifier: only the original entry.
+        assert_eq!(generate_suffix_formats("%Y"), vec!["%Y"]);
+    }
+
+    #[test]
+    fn test_generate_suffix_formats_iso_with_offset() {
+        use super::generate_suffix_formats;
+        assert_eq!(
+            generate_suffix_formats("%Y-%m-%dT%H:%M%:z"),
+            vec![
+                "%Y-%m-%dT%H:%M%:z",
+                "%m-%dT%H:%M%:z",
+                "%dT%H:%M%:z",
+                "%H:%M%:z",
+                "%M%:z",
+                "%:z",
+            ]
+        );
     }
 }
