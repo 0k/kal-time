@@ -92,8 +92,19 @@ pub fn parse_partial<Tz: TimeZone + 'static>(
         let naive = parsed
             .to_naive_datetime_with_offset(offset_secs)
             .map_err(|e| e.to_string())?;
-        let offset = FixedOffset::east_opt(offset_secs).unwrap();
-        return Ok(offset.from_local_datetime(&naive).unwrap());
+        // chrono's strftime parser already validates `%z` / `%:z` / `%#z`
+        // ranges, so `offset_secs` is guaranteed to fit `FixedOffset`.
+        // Map defensively to a `Result` instead of panicking just in case.
+        let offset = FixedOffset::east_opt(offset_secs)
+            .ok_or_else(|| format!("Invalid timezone offset: {} seconds", offset_secs))?;
+        // `FixedOffset::from_local_datetime` is always `Single` (a fixed
+        // offset has no DST gap/fold), so `single()` cannot be `None`.
+        return offset.from_local_datetime(&naive).single().ok_or_else(|| {
+            format!(
+                "Unexpected non-single local time for fixed offset: {}",
+                naive
+            )
+        });
     }
 
     let ref_offset = reference.offset().fix();
@@ -120,7 +131,17 @@ pub fn parse_partial<Tz: TimeZone + 'static>(
         match local_result {
             LocalResult::Single(local_dt) => {
                 let target_offset = local_dt.offset().fix();
-                Ok(target_offset.from_local_datetime(&naive).unwrap())
+                // `FixedOffset::from_local_datetime` is always `Single`
+                // (no DST in a fixed offset).
+                target_offset
+                    .from_local_datetime(&naive)
+                    .single()
+                    .ok_or_else(|| {
+                        format!(
+                            "Unexpected non-single local time for fixed offset {}: {}",
+                            target_offset, naive
+                        )
+                    })
             }
             LocalResult::None => Err(format!(
                 "Non-existent time during DST transition: {} does not exist (clocks skip forward)",
@@ -134,8 +155,18 @@ pub fn parse_partial<Tz: TimeZone + 'static>(
             )),
         }
     } else {
-        // Reference has explicit fixed offset - use it directly
-        Ok(ref_offset.from_local_datetime(&naive).unwrap())
+        // Reference has explicit fixed offset - use it directly.
+        // `FixedOffset::from_local_datetime` is always `Single` (no DST
+        // in a fixed offset).
+        ref_offset
+            .from_local_datetime(&naive)
+            .single()
+            .ok_or_else(|| {
+                format!(
+                    "Unexpected non-single local time for fixed offset {}: {}",
+                    ref_offset, naive
+                )
+            })
     }
 }
 
